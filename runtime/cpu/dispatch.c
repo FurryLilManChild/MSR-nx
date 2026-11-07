@@ -17,7 +17,16 @@ static GuestFn lookup(u32 target) {
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
         u32 m = msr_fn_addr[mid] & ~1u;
-        if (m == a) return msr_fn_ptr[mid];
+        if (m == a) {
+            if ((msr_fn_addr[mid] & 1u) != (target & 1u) && (target & 1u)) {
+                // A Thumb target (bit 0 set) that our list has as ARM, or the reverse through a
+                // pop/ldr pc. Running it in the wrong mode is never right.
+                msr_log("fatal: target %08X is %s code, but the function list has it as %s",
+                        target, (target & 1u) ? "Thumb" : "ARM", (msr_fn_addr[mid] & 1u) ? "Thumb" : "ARM");
+                return 0;
+            }
+            return msr_fn_ptr[mid];
+        }
         if (m < a) lo = mid + 1; else hi = mid;
     }
     return 0;

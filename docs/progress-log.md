@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-07 (evening): probes 1 to 3 on Mark's PC
+
+- Probe 1: the generated code ran from the entry point; the game looped on svc QueryMemory
+  (stand-in gave no region info). Fixed: QueryMemory answers from a region table.
+- Probe 2: startup reached srv: (RegisterClient), APT:A (cmd 0x0101), heap 0x08000000 size 0x40000,
+  linear heap 0x14000000 size 0x37C0000, then "lost control" at 0x0016E754.
+- Probe 3 (unexpected-return logging): the constructor loop at 0x104D3C (init_array 0x6FDF18, 1204
+  relative entries) called entry 46 (0x603B8C), which tail-calls the false entry 0x610074; that
+  function's generated body started at 0x107CB0 (lowest address, a veneer reached by a branch)
+  instead of its entry. Cause: functions were emitted in address order with no jump to the entry.
+  1,185 of 22,697 functions had code below their entry. Fixed: `goto L_entry` first.
+- Lookup now refuses a Thumb target that the function list has as ARM.
+
 ## 2026-11-07 (day): generator, instruction tests, probe runtime
 
 - 3dsrecomp cross-check (Mark's PC): 22,959 functions, 90.6% code, 5.1% unreached, same largest

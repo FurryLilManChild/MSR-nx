@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     msr_log_open(argv[2]);
-    msr_receipt("MSR-nx probe 3 (adds unexpected-return logging and the function trace on every stop)");
+    msr_receipt("MSR-nx probe 4 (functions start at their entry; ARM/Thumb mode check)");
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_exception);
 #else

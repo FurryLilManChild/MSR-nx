@@ -118,6 +118,10 @@ def gen_function(prog, fn, stats, problems):
     out += ['  ' + l for l in regs.declare_in()]
     hooks = FnHooks(prog, fn, stats)
     addrs = sorted(fn.insns)
+    if addrs and addrs[0] != fn.addr:
+        # Code reached by a branch lies below the entry: start at the entry, not the lowest address.
+        out.append('  goto L_%08X;' % fn.addr)
+        stats['entry_not_first'] += 1
     for k, a in enumerate(addrs):
         ins = fn.insns[a]
         out.append('L_%08X: // %s %s' % (a, ins.mnem, ins.op_str))
