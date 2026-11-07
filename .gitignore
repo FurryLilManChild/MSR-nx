@@ -1,0 +1,38 @@
+# Game data: never commit (dump, extracted files, anything derived from them)
+assets/
+*.3ds
+*.cci
+*.cia
+*.cxi
+extract/
+analysis/
+gen/
+generated/
+*.bin
+romfs/
+exefs/
+
+# Build output and SD staging
+build*/
+out/
+*.nro
+*.nacp
+*.elf
+*.o
+*.a
+*.dksh
+shadercache/
+
+# Upstream checkouts and local tools
+tools/upstream/
+tools/3dsrecomp-src/
+third_party/*/
+!third_party/README.md
+
+# Logs and misc
+*.log
+switchlogs/
+__pycache__/
+*.pyc
+.vs/
+.vscode/
