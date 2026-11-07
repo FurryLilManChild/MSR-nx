@@ -36,7 +36,7 @@ $sources += (Resolve-Path "$gen\table.c").Path
 $sources += @("runtime\cpu\dispatch.c", "runtime\os\log.c", "runtime\os\mem.c", "runtime\os\svc.c",
               "runtime\probe\main_probe.c") | ForEach-Object { (Resolve-Path $_).Path }
 
-$headerTime = (Get-ChildItem "runtime\cpu\*.h", "runtime\os\*.h" | Sort-Object LastWriteTime | Select-Object -Last 1).LastWriteTime
+$headerTime = (Get-ChildItem "runtime\cpu\*.h" | Sort-Object LastWriteTime | Select-Object -Last 1).LastWriteTime
 Write-Host "[2/3] Compiling $($sources.Count) files with $Jobs jobs..."
 $running = @()
 $done = 0
@@ -44,8 +44,8 @@ $objects = @()
 foreach ($src in $sources) {
     $o = Join-Path $obj ([IO.Path]::GetFileNameWithoutExtension($src) + ".o")
     $objects += $o
-    # Skip files that are older than their object and the runtime headers.
-    if ((Test-Path $o) -and ((Get-Item $o).LastWriteTime -gt (Get-Item $src).LastWriteTime) -and
+    # Skip generated files whose object is newer than the source and the CPU headers.
+    if ($src -like "*\build\gen\*" -and (Test-Path $o) -and ((Get-Item $o).LastWriteTime -gt (Get-Item $src).LastWriteTime) -and
         ((Get-Item $o).LastWriteTime -gt $headerTime)) {
         $done++
         continue
