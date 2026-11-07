@@ -38,6 +38,17 @@ void msr_jump_indirect(Cpu* c, u32 target) {
     c->pc = target;                  // otherwise a return through a register (bx r3 and the like)
 }
 
+static unsigned g_unwinds;
+
+void msr_unwind(Cpu* c, u32 call_site, u32 expected) {
+    if (g_unwinds++ < 200)
+        msr_log("unwind: call at %08X expected a return to %08X, got %08X (lr %08X sp %08X)",
+                call_site, expected, c->pc, c->r[14], c->r[13]);
+    if (g_unwinds == 1)
+        msr_receipt("first unexpected return: call at %08X expected %08X, got %08X",
+                    call_site, expected, c->pc);
+}
+
 void msr_unknown(Cpu* c, u32 addr, const char* what) {
     msr_log("fatal: %s at %08X", what, addr);
     msr_fatal(c, what);
@@ -57,6 +68,7 @@ void msr_run(Cpu* c, u32 entry, u32 stop) {
             msr_fatal(c, "lost control");
         }
         c->r[15] = pc;
+        msr_log("run: entering %08X from the top level", pc);
         f(c);
     }
 }

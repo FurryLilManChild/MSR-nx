@@ -44,10 +44,12 @@ void msr_receipt(const char* fmt, ...) {
 }
 
 void msr_dump_state(Cpu* c);
+void msr_dump_trace(void);
 
 void msr_fatal(Cpu* c, const char* why) {
     msr_receipt("stopped: %s", why);
     if (c) msr_dump_state(c);
+    msr_dump_trace();
     msr_log_close();
     exit(2);
 }

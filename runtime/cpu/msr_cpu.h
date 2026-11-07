@@ -141,3 +141,5 @@ void msr_svc(Cpu* c, u32 imm);
 void msr_call_indirect(Cpu* c, u32 target);   // a call through a register
 void msr_jump_indirect(Cpu* c, u32 target);   // a jump through a register that is not a return
 void msr_unknown(Cpu* c, u32 addr, const char* what);
+// A call returned somewhere other than its return address (logged; control unwinds).
+void msr_unwind(Cpu* c, u32 call_site, u32 expected);

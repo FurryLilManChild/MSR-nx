@@ -29,7 +29,7 @@ const char* msr_trace_ring[64];
 unsigned msr_trace_pos;
 #endif
 
-static void dump_trace(void) {
+void msr_dump_trace(void) {
 #ifdef MSR_TRACE
     msr_receipt("last functions entered (oldest first):");
     for (unsigned k = 0; k < 64; k++) {
@@ -47,7 +47,7 @@ static void crashed(unsigned long code, const void* where, int is_write) {
                     (u32)(a - base));
     else
         msr_receipt("crash: host exception %lX at host address %p", code, where);
-    dump_trace();
+    msr_dump_trace();
     msr_svc_summary();
     msr_log_close();
 }
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     msr_log_open(argv[2]);
-    msr_receipt("MSR-nx probe 2 (generated code, kernel call logging, QueryMemory, stall detection)");
+    msr_receipt("MSR-nx probe 3 (adds unexpected-return logging and the function trace on every stop)");
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_exception);
 #else

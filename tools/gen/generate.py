@@ -54,13 +54,15 @@ class FnHooks:
         else:
             e.line('msr_call_indirect(c, %s);' % emit.h(target))
             self.stats['calls_to_unknown'] += 1
-        e.line('if (__builtin_expect(c->pc != %s, 0)) return;' % emit.h(ret))
+        e.line('if (__builtin_expect(c->pc != %s, 0)) { msr_unwind(c, %s, %s); return; }'
+               % (emit.h(ret), emit.h(e.ins.addr), emit.h(ret)))
         e.line(regs.sync_in())
 
     def call_indirect(self, e, t, ret):
         e.line(regs.sync_out())
         e.line('msr_call_indirect(c, %s);' % t)
-        e.line('if (__builtin_expect(c->pc != %s, 0)) return;' % emit.h(ret))
+        e.line('if (__builtin_expect(c->pc != %s, 0)) { msr_unwind(c, %s, %s); return; }'
+               % (emit.h(ret), emit.h(e.ins.addr), emit.h(ret)))
         e.line(regs.sync_in())
         self.stats['icalls'] += 1
 
