@@ -1,5 +1,25 @@
 # Progress log (newest first)
 
+## 2026-11-07 (day): generator, instruction tests, probe runtime
+
+- 3dsrecomp cross-check (Mark's PC): 22,959 functions, 90.6% code, 5.1% unreached, same largest
+  unreached runs as msr2ds. msr2ds's list (22,697) is the base.
+- Our generator (`tools/gen`): decoder walks all 22,697 functions (1,418,854 instructions, 107 ARM
+  and 39 Thumb instruction ids); translator to C; whole-game output 27 units, 13 untranslated
+  instructions (12 user-mode ldm/stm, 1 cdp: privileged forms an application cannot run, so data
+  between functions; logged if ever reached).
+- Instruction tests (`tools/gen/test_insns.py`) against Unicorn (ARM1176), 751 instruction samples
+  x 16 random states: all pass except accesses whose address wraps past 0xFFFFFFFF (Unicorn wraps to
+  0; our window does not; games never do this).
+- Bugs the tests found and fixed: capstone's update_flags is set for adc/rsc without S (now read
+  from bit 20), capstone misses post-indexing for ldrd/strd (now read from the P bit), ARM shift
+  aliases with two operands, str pc stores pc + 8.
+- One 5 MB unit compiles at -O2 in 45 s on the cloud machine.
+- Probe runtime: 4 GiB window (VirtualAlloc reserve, commit on demand), dispatcher for register
+  calls/jumps, first 3DS kernel calls (memory, handles, ticks, ports, srv:GetServiceHandle; other
+  IPC answered with stand-in success and logged), crash handler with the last 64 functions entered.
+  Linux and MinGW-w64 compile checks pass.
+
 ## 2026-11-07: kickoff
 
 - Dump: decrypted USA cartridge, `Metroid - Samus Returns (USA) (En,Fr,Es).3ds`, NoCrypto,
