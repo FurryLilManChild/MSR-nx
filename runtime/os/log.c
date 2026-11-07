@@ -36,6 +36,9 @@ void msr_receipt(const char* fmt, ...) {
     vlog(g_receipt, fmt, ap);
     va_end(ap);
     va_start(ap, fmt);
+    vlog(stdout, fmt, ap);   // the window shows the receipt too
+    va_end(ap);
+    va_start(ap, fmt);
     vlog(g_log, fmt, ap);
     va_end(ap);
 }

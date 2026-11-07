@@ -85,6 +85,22 @@ void msr_svc(Cpu* c, u32 imm) {
         msr_fatal(c, "probe limit");
     }
     msr_log("svc %02X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X", imm, r[0], r[1], r[2], r[3], r[14]);
+    {
+        // Stall detection: the same call with the same arguments from the same place, over and over.
+        static u32 last[6];
+        static unsigned repeats;
+        u32 cur[6] = {imm, r[0], r[1], r[2], r[3], r[14]};
+        if (!memcmp(cur, last, sizeof cur)) {
+            if (++repeats >= 200) {
+                msr_receipt("probe: svc %02X repeated 200 times with the same arguments from lr %08X: "
+                            "the game is waiting on something the runtime does not provide yet", imm, r[14]);
+                msr_fatal(c, "stalled");
+            }
+        } else {
+            repeats = 0;
+            memcpy(last, cur, sizeof cur);
+        }
+    }
     switch (imm) {
     case 0x01: {  // ControlMemory(op, addr0, addr1, size, perm) -> r1 = address
         u32 op = r[0], addr0 = r[1], size = r[3];
@@ -92,7 +108,8 @@ void msr_svc(Cpu* c, u32 imm) {
         if ((op & 0xFF) == 3) {  // COMMIT
             u32 a = addr0 ? addr0 : base + (op & 0x10000 ? g_linear_used : g_heap_used);
             if (!addr0) { if (op & 0x10000) g_linear_used += size; else g_heap_used += size; }
-            msr_mem_commit(a, size);
+            msr_mem_map(a, size, MSR_PERM_RW, op & 0x10000 ? MSR_STATE_CONTINUOUS : MSR_STATE_PRIVATE,
+                        op & 0x10000 ? "linear heap" : "heap");
             msr_receipt("memory: ControlMemory commit %08X size %X%s", a, size, op & 0x10000 ? " (linear)" : "");
             r[0] = 0; r[1] = a;
         } else {
@@ -101,10 +118,13 @@ void msr_svc(Cpu* c, u32 imm) {
         }
         return;
     }
-    case 0x02:  // QueryMemory
-        msr_log("svc QueryMemory %08X (stand-in)", r[2]);
-        r[0] = 0;
+    case 0x02: {  // QueryMemory(addr in r2) -> r1 base, r2 size, r3 perm, r4 state, r5 page flags
+        MsrRegion q = msr_mem_query(r[2]);
+        msr_log("svc QueryMemory %08X -> %08X size %X perm %X state %X (%s)", r[2], q.base, q.size,
+                q.perm, q.state, q.name);
+        r[0] = 0; r[1] = q.base; r[2] = q.size; r[3] = q.perm; r[4] = q.state; r[5] = 0;
         return;
+    }
     case 0x03:
         msr_receipt("stopped: the game called ExitProcess");
         msr_fatal(0, "ExitProcess");
@@ -129,7 +149,7 @@ void msr_svc(Cpu* c, u32 imm) {
     case 0x1E: r[0] = 0; r[1] = new_handle("memblock"); return;
     case 0x1F:  // MapMemoryBlock(handle, addr, perm, other perm)
         msr_receipt("memory: MapMemoryBlock %X (%s) at %08X", r[0], handle_name(r[0]), r[1]);
-        if (r[1]) msr_mem_commit(r[1], 0x10000);
+        if (r[1]) msr_mem_map(r[1], 0x10000, MSR_PERM_RW, MSR_STATE_SHARED, handle_name(r[0]));
         r[0] = 0;
         return;
     case 0x20: r[0] = 0; return;

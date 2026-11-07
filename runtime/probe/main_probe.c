@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     msr_log_open(argv[2]);
-    msr_receipt("MSR-nx probe 1 (generated code, kernel call logging)");
+    msr_receipt("MSR-nx probe 2 (generated code, kernel call logging, QueryMemory, stall detection)");
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_exception);
 #else
@@ -120,11 +120,19 @@ int main(int argc, char** argv) {
     msr_receipt("code.bin %u bytes, data at %08X (%u pages), bss %X, stack %X",
                 (unsigned)code_size, data_addr, data_pages, bss, stack);
     if (!msr_mem_init()) return 1;
-    u32 image_end = data_addr + data_pages * 0x1000 + bss;
-    msr_mem_commit(MSR_CODE_BASE, image_end - MSR_CODE_BASE);
+    u32 text_addr, text_pages, ro_addr, ro_pages;
+    memcpy(&text_addr, ex + 0x10, 4);
+    memcpy(&text_pages, ex + 0x14, 4);
+    memcpy(&ro_addr, ex + 0x20, 4);
+    memcpy(&ro_pages, ex + 0x24, 4);
+    msr_mem_map(text_addr, text_pages * 0x1000, MSR_PERM_RX, MSR_STATE_CODE, "text");
+    msr_mem_map(ro_addr, ro_pages * 0x1000, MSR_PERM_R, MSR_STATE_CODE, "rodata");
+    msr_mem_map(data_addr, data_pages * 0x1000 + bss, MSR_PERM_RW, MSR_STATE_PRIVATE, "data+bss");
     memcpy(g_mem + MSR_CODE_BASE, code, code_size);
-    msr_mem_commit(MSR_STACK_TOP - (stack ? stack : 0x10000) - 0x1000, (stack ? stack : 0x10000) + 0x1000);
-    msr_mem_commit(0x1FF80000u, 0x3000);   // config memory, shared page, TLS
+    u32 stack_size = stack ? (stack + 0xFFF) & ~0xFFFu : 0x10000;
+    msr_mem_map(MSR_STACK_TOP - stack_size, stack_size, MSR_PERM_RW, MSR_STATE_PRIVATE, "stack");
+    msr_mem_map(0x1FF80000u, 0x2000, MSR_PERM_R, MSR_STATE_SHARED, "config+shared page");
+    msr_mem_map(MSR_TLS_BASE, 0x1000, MSR_PERM_RW, MSR_STATE_PRIVATE, "tls");
 
     Cpu* c = &g_cpu;
     memset(c, 0, sizeof *c);
