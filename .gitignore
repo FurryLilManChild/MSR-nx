@@ -6,8 +6,8 @@ assets/
 *.cxi
 extract/
 analysis/
-gen/
-generated/
+/gen/
+/generated/
 *.bin
 romfs/
 exefs/
