@@ -89,8 +89,19 @@ class FnHooks:
             return
         if not is_load and not e.ins.thumb:
             t = '(%s & ~3u)' % t
-        if is_load:
+        ins = e.ins
+        from_stack = ins.id in (emit.A.ARM_INS_POP, emit.A.ARM_INS_LDM) or (
+            ins.id == emit.A.ARM_INS_LDR and ins.operands[1].type == emit.A.ARM_OP_MEM and
+            ins.operands[1].mem.base == emit.A.ARM_REG_SP)
+        if is_load and from_stack:
             self.leave(e, t)   # pop {pc} / ldr pc, [sp], #4: a return
+        elif is_load:
+            # A load into pc that is not a pop and not a detected table: try this function's
+            # block starts first (an undetected jump table), otherwise leave through the runtime.
+            self.switch_leaders(e, t)
+            e.line(regs.sync_out())
+            e.line('msr_jump_indirect(c, %s); return;' % t)
+            self.stats['ijumps'] += 1
         else:
             # mov pc, lr is a return; anything else goes through the runtime.
             if e.ins.id == emit.A.ARM_INS_MOV and e.ins.operands[1].type == emit.A.ARM_OP_REG and \
@@ -100,6 +111,15 @@ class FnHooks:
                 e.line(regs.sync_out())
                 e.line('msr_jump_indirect(c, %s); return;' % t)
                 self.stats['ijumps'] += 1
+
+    def switch_leaders(self, e, t):
+        targets = sorted(self.fn.leaders & set(self.fn.insns))
+        e.line('switch (%s) {' % t)
+        for x in targets:
+            e.line('  case %s: goto L_%08X;' % (emit.h(x | (1 if self.fn.thumb else 0)), x))
+        e.line('  default: break;')
+        e.line('}')
+        self.stats['leader_switches'] += 1
 
     def svc(self, e, imm):
         nxt = (e.ins.addr + e.ins.size) | (1 if e.ins.thumb else 0)

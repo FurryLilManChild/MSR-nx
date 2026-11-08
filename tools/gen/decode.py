@@ -209,18 +209,28 @@ def arm_table_targets(ins, prog):
 
 
 def table_bound(ins, prog):
-    """Finds `cmp rX, #n` among the few instructions before a table jump."""
-    idx_reg = None
+    """Number of entries of an ARM jump table: finds `cmp rX, #n` among the 16 instructions before
+    the table jump (compilers slot other work in between). `lo` (index < n) gives n entries,
+    `ls` (index <= n) gives n + 1."""
     ops = ins.operands
     if ins.id == A.ARM_INS_LDR:
         idx_reg = ops[1].mem.index
     else:
         idx_reg = ops[2].reg
-    for back in range(1, 5):
+    for back in range(1, 17):
         p = prog.decode_one(ins.addr - 4 * back, False)
-        if p and p.id == A.ARM_INS_CMP and p.operands[0].reg == idx_reg and \
+        if p is None:
+            return None
+        if p.id == A.ARM_INS_CMP and p.operands[0].reg == idx_reg and \
                 p.operands[1].type == A.ARM_OP_IMM:
-            return p.operands[1].imm
+            n = p.operands[1].imm
+            return n - 1 if ins.cc == A.ARM_CC_LO else n
+        # stop if something else writes the index register first
+        if any(o.type == A.ARM_OP_REG and o.reg == idx_reg and o.access & capstone.CS_AC_WRITE
+               for o in p.operands):
+            return None
+        if p.id in (A.ARM_INS_B, A.ARM_INS_BL, A.ARM_INS_BX, A.ARM_INS_BLX):
+            return None
     return None
 
 

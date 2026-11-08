@@ -12,6 +12,11 @@
   instead of its entry. Cause: functions were emitted in address order with no jump to the entry.
   1,185 of 22,697 functions had code below their entry. Fixed: `goto L_entry` first.
 - Lookup now refuses a Thumb target that the function list has as ARM.
+- Probe 4: past the constructor at 0x603B8C (new svc 27 DuplicateHandle); stopped at an undetected
+  jump table, `ldrlo pc, [pc, r4, lsl #2]` at 0x42571C with its `cmp r4, #6` five instructions
+  earlier (stores in between). The jump was taken as a return. Fixed: search 16 instructions back,
+  `lo` tables have n entries (`ls` n + 1). Tables found: 141, the same as msr2ds. The 7 remaining
+  non-stack loads into pc first switch over the function's block starts.
 
 ## 2026-11-07 (day): generator, instruction tests, probe runtime
 
