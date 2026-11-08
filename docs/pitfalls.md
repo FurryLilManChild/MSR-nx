@@ -19,3 +19,7 @@
 - Thumb `blx` to a compiler switch helper is a jump table, not a call: the bytes after it are data.
 - Capping instruction test samples per kind: the one untested operand shape (rotated ADR) broke 654
   address calculations. Test every distinct shape.
+- Assuming a game is stuck when it is waiting for input it accepts in a different form (Samus Returns
+  moves with the circle pad; the d-pad is for Aeion abilities).
+- Calling a theory the cause in a status message before testing it (the "waits for a sound" theory
+  was wrong; say "theory" and test it next).

@@ -1,5 +1,23 @@
 # Progress log (newest first)
 
+## 2026-11-08 (early morning): first pictures, title screen, gameplay (cloud probe)
+
+- PICA200 command processor, vertex shader interpreter and a software reference renderer (probe
+  only, never shipped) write PNG frames. First frame: planet SR388.
+- View matrices were NaN: cfg block 0x50005 (stereo camera settings) was answered with zeros and
+  the game divided by it. Retail defaults now. Found with a NaN-check build of the generated code.
+- Title screen: triangle culling was the wrong way round (every 2D layer culled) and clamp-to-border
+  wrap always read texel 0 (final composite black). Fixed.
+- File select, story intro, save data written (profile0/*.bmssv), then gameplay.
+- "Frozen" first scene: Samus moves with the circle pad, not the d-pad; she was invisible because
+  w-buffer depth was computed as w * scale (negative, clamped to 0) instead of (z/w * scale +
+  offset) * w. Fixed: Samus on her gunship, running and jumping.
+- Native DSP audio: 24 voices (PCM8, PCM16, DSP-ADPCM), status reports, mixer with aux busses,
+  output ring for the platform layer, WAV dump in the probe.
+- Probe speed: pixel work only for saved frames; 20 s of game time runs in about 19 s.
+- Probe options: MSR_SECONDS, MSR_FRAME_EVERY, MSR_FRAMES_AFTER, MSR_INPUT (buttons and circle pad
+  over game-time ranges), MSR_WAV, MSR_DRAWLOG, MSR_DUMPRT.
+
 ## 2026-11-07 (night): probes 5 to 9 in the cloud (Claude runs the probe loop)
 
 - Probe 6: native fs:USER (SelfNCCH RomFS from romfs.bin offset 0x1000) and cfg:u; the RomFS opened
