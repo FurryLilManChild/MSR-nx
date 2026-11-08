@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 #include "msr_cpu.h"
 #include "msr_log.h"
 #include "msr_mem.h"
@@ -93,7 +97,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     msr_log_open(argv[2]);
-    msr_receipt("MSR-nx probe 9 (scheduler, sync objects, dsp, gsp interrupts and GX, switch8 tables)");
+    msr_receipt("MSR-nx probe 14 (PICA200 command processor, shader interpreter, reference renderer)");
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_exception);
 #else
@@ -105,6 +109,23 @@ int main(int argc, char** argv) {
     sigaction(SIGBUS, &sa, 0);
 #endif
     snprintf(msr_extract_dir, sizeof msr_extract_dir, "%s", argv[1]);
+    {
+        extern char msr_frames_dir[512];
+        snprintf(msr_frames_dir, sizeof msr_frames_dir, "%s/frames", argv[2]);
+#ifdef _WIN32
+        _mkdir(msr_frames_dir);
+#else
+        mkdir(msr_frames_dir, 0777);
+#endif
+    }
+    {
+        extern u64 msr_time_limit_ns;
+        extern unsigned msr_frame_every;
+        const char* e = getenv("MSR_SECONDS");
+        if (e) msr_time_limit_ns = (u64)atoi(e) * 1000000000ull;
+        e = getenv("MSR_FRAME_EVERY");
+        if (e) msr_frame_every = (unsigned)atoi(e);
+    }
     { extern char msr_save_dir[512]; snprintf(msr_save_dir, sizeof msr_save_dir, "%s/save", argv[2]); }
     char path[600];
     size_t code_size = 0, ex_size = 0;

@@ -101,6 +101,12 @@ MSR_INLINE float sf(const Cpu* c, int i) { float f; memcpy(&f, &c->vfp.s[i], 4);
 MSR_INLINE void set_sf(Cpu* c, int i, float f) { memcpy(&c->vfp.s[i], &f, 4); }
 MSR_INLINE double df(const Cpu* c, int i) { double d; memcpy(&d, &c->vfp.dw[i], 8); return d; }
 MSR_INLINE void set_df(Cpu* c, int i, double d) { memcpy(&c->vfp.dw[i], &d, 8); }
+#ifdef MSR_NANCHECK
+// Debug build: reports the first functions that produce a NaN in a VFP register.
+void msr_nan_seen(const char* fn, int reg, int dbl);
+#define set_sf(c, i, f) do { float nan_v_ = (f); if (nan_v_ != nan_v_) msr_nan_seen(__func__, (i), 0); set_sf((c), (i), nan_v_); } while (0)
+#define set_df(c, i, d) do { double nan_v_ = (d); if (nan_v_ != nan_v_) msr_nan_seen(__func__, (i), 1); set_df((c), (i), nan_v_); } while (0)
+#endif
 
 // VFP compare: FPSCR NZCV as the ARM ARM defines it (unordered = 0011).
 MSR_INLINE u32 vcmp_flags(double a, double b) {

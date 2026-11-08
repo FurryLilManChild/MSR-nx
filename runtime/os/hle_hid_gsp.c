@@ -5,6 +5,7 @@
 #include "hle.h"
 #include "msr_log.h"
 #include "sched.h"
+#include "pica.h"
 
 static u32 g_hid_mem, g_hid_events[5];
 static u32 g_gsp_mem, g_gsp_event;
@@ -81,27 +82,30 @@ static void gx_command(u32 entry) {
         gsp_interrupt(IRQ_DMA);
         break;
     case 0x01:  // ProcessCommandList(address, size, flags)
-        msr_log("gx: command list %08X size %X (no renderer yet)", d[0], d[1]);
+        msr_log("gx: command list %08X size %X", d[0], d[1]);
+        pica_run_list(d[0], d[1]);
         gsp_interrupt(IRQ_P3D);
         break;
     case 0x02:  // MemoryFill(start0, value0, end0, start1, value1, end1, control)
         for (int b = 0; b < 2; b++) {
             u32 start = d[b * 3], value = d[b * 3 + 1], end = d[b * 3 + 2];
             if (!start || end <= start) continue;
-            u32 ctl = d[6] >> (16 * b), width = (ctl >> 8) & 3;   // 0: 16 bit, 1/2: 24 bit, 3: 32 bit
+            u32 ctl = d[6] >> (16 * b), width = (ctl >> 8) & 3;   // bit 8: 24 bit, bit 9: 32 bit, neither: 16
             if (width == 0) for (u32 a = start; a + 2 <= end; a += 2) wr16(a, (u16)value);
-            else if (width == 3) for (u32 a = start; a + 4 <= end; a += 4) wr32(a, value);
+            else if (width & 2) for (u32 a = start; a + 4 <= end; a += 4) wr32(a, value);
             else for (u32 a = start; a + 3 <= end; a += 3) { wr8(a, (u8)value); wr8(a + 1, (u8)(value >> 8)); wr8(a + 2, (u8)(value >> 16)); }
             msr_log("gx: fill %08X..%08X with %08X (width %u)", start, end, value, width);
             gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0);
         }
         break;
     case 0x03:  // DisplayTransfer(input, output, input size, output size, flags)
-        msr_log("gx: display transfer %08X -> %08X (no renderer yet)", d[0], d[1]);
+        msr_log("gx: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]);
+        pica_display_transfer(d[0], d[1], d[2], d[3], d[4]);
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x04:  // TextureCopy(input, output, size, input gap, output gap, flags)
-        msr_log("gx: texture copy %08X -> %08X size %X (no renderer yet)", d[0], d[1], d[2]);
+        msr_log("gx: texture copy %08X -> %08X size %X", d[0], d[1], d[2]);
+        pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]);
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x05:  // FlushCacheRegions
@@ -148,6 +152,7 @@ static void gsp_latch_framebuffers(void) {
             msr_log("gsp: screen %d shows %08X (stride %u, format %X)", screen, msr_fb[screen].left,
                     msr_fb[screen].stride, msr_fb[screen].format);
         wr8(rec + 1, 0);
+        pica_frame_shown(screen, msr_fb[screen].left, msr_fb[screen].stride, msr_fb[screen].format);
     }
 }
 

@@ -97,6 +97,7 @@ void msr_svc(Cpu* c, u32 imm) {
     if (sched_now_ns() > msr_time_limit_ns) {
         msr_receipt("probe: %llu s of game time reached, stopping", (unsigned long long)(msr_time_limit_ns / 1000000000ull));
         sched_summary();
+        { void pica_summary(void); pica_summary(); }
         msr_fatal(c, "time limit");
     }
     if (sched_poll_timers()) sched_after_signal(c);
@@ -236,7 +237,11 @@ void msr_svc(Cpu* c, u32 imm) {
         msr_ticks = sched_now_ns() / 1000 * 268111856ull / 1000000;
         r[0] = (u32)msr_ticks; r[1] = (u32)(msr_ticks >> 32);
         return;
-    case 0x2B: r[0] = 0; r[1] = 0; r[2] = 0; return;
+    case 0x2B:  // GetProcessInfo(handle r1, type r2) -> s64 in r1:r2
+        if (r[2] == 20) { r[0] = 0; r[1] = 0x20000000u - MSR_LINEAR_BASE; r[2] = 0; return; }  // FCRAM minus linear base
+        msr_receipt("svc GetProcessInfo type %u (answered 0)", r[2]);
+        r[0] = 0; r[1] = 0; r[2] = 0;
+        return;
     case 0x2D: {  // ConnectToPort(out handle, name)
         char name[16];
         read_cstr(r[1], name, sizeof name);
