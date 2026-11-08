@@ -123,7 +123,7 @@ static Color fetch_texel(const u8* base, u32 fmt, u32 w, u32 x, u32 y) {
 static int wrap(int i, int n, u32 mode, int* border) {
     switch (mode) {
     case 0: return i < 0 ? 0 : i >= n ? n - 1 : i;              // clamp to edge
-    case 1: if (i < 0 || i >= n) *border = 1; return 0;          // clamp to border
+    case 1: if (i < 0 || i >= n) { *border = 1; return 0; } return i;   // clamp to border
     case 3: { int p = ((i % (2 * n)) + 2 * n) % (2 * n); return p < n ? p : 2 * n - 1 - p; }  // mirror
     default: return ((i % n) + n) % n;                            // repeat
     }
@@ -321,12 +321,14 @@ typedef struct {
     u32 w, h, cfmt, dfmt, cbpp;
 } Target;
 
+static unsigned g_st_frag, g_st_alpha, g_st_depth, g_st_written;
 static void fragment(Target* T, int x, int y, float depth, Color c) {
+    g_st_frag++;
     const u32* r = g_pica.reg;
     // alpha test
     u32 at = r[0x104];
     u32 a8 = (u32)(clampf(c.a, 0, 1) * 255 + 0.5f);
-    if ((at & 1) && !compare((at >> 4) & 7, a8, (at >> 8) & 0xFF)) return;
+    if ((at & 1) && !compare((at >> 4) & 7, a8, (at >> 8) & 0xFF)) { g_st_alpha++; return; }
     u32 my = T->h - 1 - (u32)y;   // memory rows run top to bottom
     u32 off = tiled_offset((u32)x, my, T->w);
     // depth and stencil
@@ -353,13 +355,14 @@ static void fragment(Target* T, int x, int y, float depth, Color c) {
             dp[3] = (u8)((sv & ~wm) | (nv & wm));
             if (!zp) return;
         } else if ((dm & 1) && !compare((dm >> 4) & 7, z, old)) depth_ok = 0;
-        if (!depth_ok) return;
+        if (!depth_ok) { g_st_depth++; return; }
         if ((dm >> 12) & 1 && r[0x115]) {
             dp[0] = (u8)z; dp[1] = (u8)(z >> 8);
             if (dbytes >= 3) dp[2] = (u8)(z >> 16);
         }
     }
     if (!T->color || !r[0x113]) return;
+    g_st_written++;
     u8* cp = T->color + off * T->cbpp;
     Color d = decode_color(cp, T->cfmt);
     Color o = c;
@@ -415,8 +418,8 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
     float area = (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
     if (area == 0) return;
     u32 cull = r[0x40] & 3;
-    if (cull == 1 && area < 0) return;
-    if (cull == 2 && area > 0) return;
+    if (cull == 1 && area > 0) return;   // keep clockwise
+    if (cull == 2 && area < 0) return;   // keep counter-clockwise
     int x0 = (int)floorf(fminf(a->x, fminf(b->x, c->x))), x1 = (int)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
     int y0 = (int)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
     int sx0 = 0, sy0 = 0, sx1 = (int)T->w - 1, sy1 = (int)T->h - 1;
@@ -477,6 +480,41 @@ unsigned msr_skipped_triangles;
 
 void pica_draw_triangles(const PicaVertex* v, unsigned count) {
     if (!msr_draw_this_frame) { msr_skipped_triangles += count / 3; return; }
+    static unsigned logged;
+    unsigned f0 = g_st_frag, a0 = g_st_alpha, d0 = g_st_depth, w0 = g_st_written;
+    void draw_body(const PicaVertex* v, unsigned count);
+    draw_body(v, count);
+    if (getenv("MSR_DRAWLOG") && logged < 4000) {
+        logged++;
+        const u32* r = g_pica.reg;
+        msr_log("raster: target %08X %ux%u fmt %u, %u tris, frags %u alpha-fail %u depth-fail %u written %u, tex %X fmts %X/%X/%X, light %u",
+                r[0x11D] << 3, r[0x11E] & 0x7FF, ((r[0x11E] >> 12) & 0x3FF) + 1, (r[0x117] >> 16) & 7, count / 3,
+                g_st_frag - f0, g_st_alpha - a0, g_st_depth - d0, g_st_written - w0, r[0x80] & 7, r[0x8E] & 15, r[0x96] & 15, r[0x9E] & 15,
+                r[0x8F] & 1);
+        if (count / 3 <= 2) {
+            msr_log("raster:   tev %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X buf %08X %08X",
+                r[0xC0], r[0xC1], r[0xC2], r[0xC3], r[0xC8], r[0xC9], r[0xCA], r[0xCB], r[0xD0], r[0xD1], r[0xD2], r[0xD3],
+                r[0xD8], r[0xD9], r[0xDA], r[0xDB], r[0xF0], r[0xF1], r[0xF2], r[0xF3], r[0xF8], r[0xF9], r[0xFA], r[0xFB], r[0xE0], r[0xFD]);
+            msr_log("raster:   blend op %08X func %08X color %08X alpha test %08X depth/mask %08X tex0 dim %08X par %08X addr %08X; tex1 dim %08X addr %08X; v0 color %g %g %g %g uv %g %g",
+                r[0x100], r[0x101], r[0x103], r[0x104], r[0x107], r[0x82], r[0x83], r[0x85] << 3, r[0x92], r[0x95] << 3,
+                v[0].color.x, v[0].color.y, v[0].color.z, v[0].color.w, v[0].uv0[0], v[0].uv0[1]);
+        }
+        if ((r[0x80] & 7) == 3 && count / 3 <= 2) {
+            Color a = sample(0, 0.5f, 0.6f), b = sample(1, 0.5f, 0.6f);
+            msr_log("raster:   sample tex0 %g %g %g %g tex1 %g %g %g %g", a.r, a.g, a.b, a.a, b.r, b.g, b.b, b.a);
+            u8* t0 = pica_ptr(r[0x85] << 3);
+            unsigned nz = 0, nz2 = 0;
+            for (u32 k = 0; k < 256 * 512 * 4; k++) nz += t0[k] != 0;
+            u8* rt = g_mem + 0x1F0EA600u;
+            for (u32 k = 0; k < 240 * 400 * 4; k++) nz2 += rt[k] != 0;
+            msr_log("raster:   tex0 nonzero bytes %u, 1F0EA600 nonzero bytes %u", nz, nz2);
+        }
+        if (g_st_frag == f0) msr_log("raster:   v0 %g %g %g %g  v1 %g %g %g %g cull %u", v[0].pos.x, v[0].pos.y, v[0].pos.z, v[0].pos.w,
+                                     v[1].pos.x, v[1].pos.y, v[1].pos.z, v[1].pos.w, r[0x40] & 3);
+    }
+}
+
+void draw_body(const PicaVertex* v, unsigned count) {
     const u32* r = g_pica.reg;
     Target T;
     T.w = r[0x11E] & 0x7FF;
@@ -551,8 +589,29 @@ void pica_display_transfer(u32 in_v, u32 out_v, u32 in_dim, u32 out_dim, u32 fla
         }
 }
 
+int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
+extern char msr_frames_dir[512];
+// Debug: saves a 240x400 RGBA8 tiled render target as seen on the top screen.
+void pica_debug_dump_target(u32 v, const char* tag) {
+    static unsigned n;
+    if (!getenv("MSR_DUMPRT") || n >= 40) return;
+    u8* rgb = (u8*)malloc(400 * 240 * 3);
+    for (u32 x = 0; x < 400; x++)
+        for (u32 y = 0; y < 240; y++) {
+            u32 o = tiled_offset(239 - y, 399 - x, 240);
+            Color c = decode_color(g_mem + v + o * 4, 0);
+            u8* d = rgb + (y * 400 + x) * 3;
+            d[0] = (u8)(clampf(c.r, 0, 1) * 255); d[1] = (u8)(clampf(c.g, 0, 1) * 255); d[2] = (u8)(clampf(c.b, 0, 1) * 255);
+        }
+    char path[700];
+    snprintf(path, sizeof path, "%s/rt_%02u_%s.png", msr_frames_dir, n++, tag);
+    msr_write_png(path, rgb, 400, 240);
+    free(rgb);
+}
+
 void pica_texture_copy(u32 in_v, u32 out_v, u32 size, u32 in_gap, u32 out_gap, u32 flags) {
     (void)flags;
+    if (msr_draw_this_frame && in_v == 0x1F08CA00u) pica_debug_dump_target(in_v, "copy");
     u32 iw = (in_gap & 0xFFFF) * 16, ig = (in_gap >> 16) * 16;
     u32 ow = (out_gap & 0xFFFF) * 16, og = (out_gap >> 16) * 16;
     if (!in_v || !out_v) return;

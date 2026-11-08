@@ -178,7 +178,7 @@ static void gx_command(u32 entry) {
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x04:  // TextureCopy(input, output, size, input gap, output gap, flags)
-        msr_log("gx: texture copy %08X -> %08X size %X", d[0], d[1], d[2]);
+        msr_log("gx: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]);
         pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]);
         gsp_interrupt(IRQ_PPF);
         break;
