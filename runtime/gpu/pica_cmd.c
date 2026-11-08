@@ -145,6 +145,7 @@ static void draw(int indexed) {
     if (indexed) g_pica.draws_indexed++;
     g_pica.vertices += n;
     if ((r[0x229] & 3) == 2) g_pica.gs_draws++;
+    { extern int msr_draw_this_frame; if (!msr_draw_this_frame) return; }   // frame not saved: skip the vertex work too
     u32 ib = r[0x227];
     u8* idx = indexed ? pica_ptr((r[0x200] << 3) + (ib & 0x0FFFFFFF)) : 0;
     int wide = (ib >> 31) & 1;

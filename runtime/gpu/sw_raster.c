@@ -470,7 +470,13 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
 
 unsigned msr_sw_triangles;
 
+// Pixel work is only done for the frames that get saved: the two frames before each saved one
+// are drawn (the game's double buffering), the rest only run their commands. 0 = draw all.
+int msr_draw_this_frame = 1;
+unsigned msr_skipped_triangles;
+
 void pica_draw_triangles(const PicaVertex* v, unsigned count) {
+    if (!msr_draw_this_frame) { msr_skipped_triangles += count / 3; return; }
     const u32* r = g_pica.reg;
     Target T;
     T.w = r[0x11E] & 0x7FF;
@@ -634,6 +640,10 @@ unsigned msr_frame_every = 30;
 void pica_frame_shown(int screen, u32 left_v, u32 stride, u32 format) {
     static unsigned shown[2];
     unsigned n = shown[screen]++;
+    if (screen == 0 && msr_frame_every > 3) {
+        unsigned left = msr_frame_every - (n + 1) % msr_frame_every;   // frames until the next save
+        msr_draw_this_frame = left <= 3 || (n + 1) % msr_frame_every == 0;
+    }
     if (!msr_frames_dir[0] || n % msr_frame_every || !left_v) return;
     u32 fmt = format & 7, bpp = k_fb_bpp[fmt];
     u32 W = screen == 0 ? 400 : 320, H = 240;
