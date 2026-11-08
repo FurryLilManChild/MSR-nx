@@ -83,6 +83,9 @@ void msr_run(Cpu* c, u32 entry, u32 stop) {
 }
 
 void msr_nan_seen(const char* fn, int reg, int dbl) {
+    static const char* seen[256];
     static int n;
-    if (n++ < 60) msr_log("nan: %s wrote NaN to %c%d", fn, dbl ? 'd' : 's', reg);
+    for (int k = 0; k < n; k++) if (seen[k] == fn) return;
+    if (n < 256) seen[n++] = fn;
+    msr_log("nan: %s wrote NaN to %c%d", fn, dbl ? 'd' : 's', reg);
 }

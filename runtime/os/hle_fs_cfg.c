@@ -540,7 +540,16 @@ int svc_cfg(Ipc* q) {
         if (id == 0x000A0002 && size) wr8(out, 1);                   // language: English
         if ((id == 0x000B0000 || id == 0x000B0001) && size >= 4) wr8(out + 3, 49);  // USA
         if (id == 0x000A0001 && size >= 2) { wr8(out, 1); wr8(out + 1, 1); }       // birthday
-        if (id == 0x000D0000 && size >= 2) { wr8(out, 1); wr8(out + 1, 1); }       // EULA
+        if (id == 0x000D0000 && size >= 2) { wr8(out, 0x7F); wr8(out + 1, 0x7F); } // EULA version accepted
+        if (id == 0x00070001 && size) wr8(out, 1);                                  // sound output: stereo
+        if (id == 0x00050005) {   // stereo camera settings: the values a retail console ships with
+            static const float k[8] = {62.0f, 289.0f, 76.80000305f, 46.08000183f, 10.0f, 5.0f, 55.58000183f, 21.56999969f};
+            for (u32 k2 = 0; k2 < 8 && 4 * k2 + 4 <= size; k2++) { u32 v; memcpy(&v, &k[k2], 4); wr32(out + 4 * k2, v); }
+        }
+        if (id == 0x000A0000) {   // user name, UTF-16
+            const char* n = "Samus";
+            for (u32 k2 = 0; n[k2] && 2 * k2 + 2 <= size; k2++) wr16(out + 2 * k2, (u8)n[k2]);
+        }
         msr_log("cfg: block %08X (%u bytes)", id, size);
         ipc_reply(q, 0, 0);
         return 1;

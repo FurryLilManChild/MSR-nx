@@ -157,6 +157,13 @@ int main(int argc, char** argv) {
     u32 stack_size = stack ? (stack + 0xFFF) & ~0xFFFu : 0x10000;
     msr_mem_map(MSR_STACK_TOP - stack_size, stack_size, MSR_PERM_RW, MSR_STATE_PRIVATE, "stack");
     msr_mem_map(0x1FF80000u, 0x2000, MSR_PERM_R, MSR_STATE_SHARED, "config+shared page");
+    // Config memory and the shared page, the values an Old 3DS shows (3dbrew "Configuration Memory")
+    wr32(0x1FF80030u, 0);             // APPMEMTYPE: 64 MB, Old 3DS
+    wr32(0x1FF80040u, 0x04000000u);   // APPMEMALLOC
+    wr32(0x1FF80044u, 0x02C00000u);   // SYSMEMALLOC
+    wr32(0x1FF80048u, 0x01400000u);   // BASEMEMALLOC
+    wr32(0x1FF81004u, 1);             // RUNNING_HW: retail
+    wr32(0x1FF81080u, 0);             // 3D_SLIDERSTATE: 0.0f
     msr_mem_map(0x1F000000u, 0x600000, MSR_PERM_RW, MSR_STATE_SHARED, "vram");
     msr_mem_map(0x1FF00000u, 0x80000, MSR_PERM_RW, MSR_STATE_SHARED, "dsp ram");
     msr_mem_map(MSR_TLS_BASE, 0x4000, MSR_PERM_RW, MSR_STATE_PRIVATE, "tls (32 threads)");
