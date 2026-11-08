@@ -431,6 +431,7 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
     if (x1 > sx1) x1 = sx1;
     if (y1 > sy1) y1 = sy1;
     float inv = 1.0f / area;
+    int wbuf = !(r[0x6D] & 1);
     u32 tex_on = r[0x80] & 7;
     int pica_lighting_on(void);
     void pica_lighting(const float* q, const float* view, const float (*tex)[4], float* prim, float* sec);
@@ -445,6 +446,7 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
             float z = w0 * a->z + w1 * b->z + w2 * c->z;
             float iw = w0 * a->iw + w1 * b->iw + w2 * c->iw;
+            if (wbuf && iw != 0) z /= iw;
             float p0 = w0 * a->iw / iw, p1 = w1 * b->iw / iw, p2 = w2 * c->iw / iw;
             #define I(f) (p0 * a->v.f + p1 * b->v.f + p2 * c->v.f)
             Color prim = {clampf(I(color.x), 0, 1), clampf(I(color.y), 0, 1), clampf(I(color.z), 0, 1), clampf(I(color.w), 0, 1)};
@@ -484,13 +486,16 @@ void pica_draw_triangles(const PicaVertex* v, unsigned count) {
     unsigned f0 = g_st_frag, a0 = g_st_alpha, d0 = g_st_depth, w0 = g_st_written;
     void draw_body(const PicaVertex* v, unsigned count);
     draw_body(v, count);
-    if (getenv("MSR_DRAWLOG") && logged < 4000) {
+    extern u64 sched_now_ns(void);
+    if (getenv("MSR_DRAWLOG") && logged < 4000 && sched_now_ns() / 1000000000ull >= (u64)atoi(getenv("MSR_DRAWLOG"))) {
         logged++;
         const u32* r = g_pica.reg;
         msr_log("raster: target %08X %ux%u fmt %u, %u tris, frags %u alpha-fail %u depth-fail %u written %u, tex %X fmts %X/%X/%X, light %u",
                 r[0x11D] << 3, r[0x11E] & 0x7FF, ((r[0x11E] >> 12) & 0x3FF) + 1, (r[0x117] >> 16) & 7, count / 3,
                 g_st_frag - f0, g_st_alpha - a0, g_st_depth - d0, g_st_written - w0, r[0x80] & 7, r[0x8E] & 15, r[0x96] & 15, r[0x9E] & 15,
                 r[0x8F] & 1);
+        msr_log("raster:   depth scale %g offset %g map %u depthreg %08X stencil %08X v0 z/w %g w %g", pica_f24(r[0x4D]), pica_f24(r[0x4E]),
+                r[0x6D] & 1, r[0x107], r[0x105], v[0].pos.z / v[0].pos.w, v[0].pos.w);
         if (count / 3 <= 2) {
             msr_log("raster:   tev %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X buf %08X %08X",
                 r[0xC0], r[0xC1], r[0xC2], r[0xC3], r[0xC8], r[0xC9], r[0xCA], r[0xCB], r[0xD0], r[0xD1], r[0xD2], r[0xD3],
@@ -548,7 +553,7 @@ void draw_body(const PicaVertex* v, unsigned count) {
             float iw = 1.0f / A[k].pos.w;
             S[k].x = (A[k].pos.x * iw + 1) * vw + vx;
             S[k].y = (A[k].pos.y * iw + 1) * vh + vy;
-            S[k].z = zbuf ? A[k].pos.z * iw * zs + zo : A[k].pos.w * zs + zo;
+            S[k].z = A[k].pos.z * iw * zs + zo;   // a w-buffer multiplies by w per pixel
             S[k].iw = iw;
             S[k].v = A[k];
         }
@@ -699,6 +704,11 @@ unsigned msr_frame_every = 30;
 void pica_frame_shown(int screen, u32 left_v, u32 stride, u32 format) {
     static unsigned shown[2];
     unsigned n = shown[screen]++;
+    {   // MSR_FRAMES_AFTER=seconds: no pictures (and no pixel work) before then
+        extern u64 sched_now_ns(void);
+        const char* fa = getenv("MSR_FRAMES_AFTER");
+        if (fa && sched_now_ns() / 1000000000ull < (u64)atoi(fa)) { msr_draw_this_frame = 0; return; }
+    }
     if (screen == 0 && msr_frame_every > 3) {
         unsigned left = msr_frame_every - (n + 1) % msr_frame_every;   // frames until the next save
         msr_draw_this_frame = left <= 3 || (n + 1) % msr_frame_every == 0;

@@ -66,14 +66,23 @@ static void probe_script(void) {
     if (!e) return;
     double now = sched_now_ns() / 1e9;
     u32 b = 0;
-    char buf[512];
+    s16 cx = 0, cy = 0;
+    char buf[2048];
     snprintf(buf, sizeof buf, "%s", e);
     for (char* tok = strtok(buf, ","); tok; tok = strtok(0, ",")) {
         char name[16]; double t0, t1;
         if (sscanf(tok, "%15[A-Z]@%lf-%lf", name, &t0, &t1) != 3) continue;
         for (int k = 0; k < 12; k++)
             if (!strcmp(name, names[k]) && now >= t0 && now < t1) b |= 1u << k;
+        if (now >= t0 && now < t1) {   // circle pad: CRIGHT, CLEFT, CUP, CDOWN
+            if (!strcmp(name, "CRIGHT")) cx = 150;
+            if (!strcmp(name, "CLEFT")) cx = -150;
+            if (!strcmp(name, "CUP")) cy = 150;
+            if (!strcmp(name, "CDOWN")) cy = -150;
+        }
     }
+    msr_circle_x = cx;
+    msr_circle_y = cy;
     if (b != (msr_buttons & 0xFFF)) msr_log("input: buttons %03X at %.2f s", b, now);
     msr_buttons = b;
 }
@@ -230,7 +239,25 @@ static void gsp_latch_framebuffers(void) {
     }
 }
 
+// The shared page's clock (3dbrew "Configuration Memory", 0x1FF81000): two DATETIME blocks at
+// 0x20 and 0x40, the selector at 0x00 naming the current one; each holds milliseconds since
+// 1900-01-01 and the system tick it was taken at. The kernel refreshes it about once a second.
+static void shared_page_clock(void) {
+    static u32 sel;
+    u64 now_ms = sched_now_ns() / 1000000ull;
+    u64 base_ms = 3971548800000ull;   // 2025-11-08 00:00 UTC in ms since 1900
+    u64 tick = sched_now_ns() / 1000 * 268111856ull / 1000000;
+    sel ^= 1;
+    u32 blk = 0x1FF81020u + 0x20 * sel;
+    wr32(blk, (u32)(base_ms + now_ms)); wr32(blk + 4, (u32)((base_ms + now_ms) >> 32));
+    wr32(blk + 8, (u32)tick); wr32(blk + 12, (u32)(tick >> 32));
+    wr32(blk + 16, 0xFFFFFFFFu);   // drift: none
+    wr32(0x1FF81000u, sel);
+}
+
 static void gsp_vblank(void) {
+    static unsigned n;
+    if (n++ % 60 == 0) shared_page_clock();
     gsp_latch_framebuffers();
     gsp_interrupt(IRQ_VBLANK_TOP);
     gsp_interrupt(IRQ_VBLANK_BOTTOM);

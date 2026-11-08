@@ -49,6 +49,7 @@ static void write_pipe(u32 channel, u32 src, u32 size) {
         for (int k = 0; k < 15; k++) { p[2 + 2 * k] = (u8)k_struct_addr[k]; p[3 + 2 * k] = (u8)(k_struct_addr[k] >> 8); }
         g_dsp.pipe_len[PIPE_AUDIO] = 32;
         g_dsp.running = 1;
+        dsp_audio_reset();
         msr_receipt("dsp: audio firmware initialized (stand-in, no mixing yet)");
     } else if (state == 1) g_dsp.running = 0;
     else if (state == 2) g_dsp.running = 1;
@@ -57,8 +58,10 @@ static void write_pipe(u32 channel, u32 src, u32 size) {
 }
 
 // The audio firmware finishes a frame of 160 samples at 32728 Hz and signals.
+void dsp_audio_frame(void);
+void dsp_audio_reset(void);
 static void dsp_frame(void) {
-    if (g_dsp.running) signal_semaphore();
+    if (g_dsp.running) { dsp_audio_frame(); signal_semaphore(); }
 }
 
 int svc_dsp(Ipc* q) {
