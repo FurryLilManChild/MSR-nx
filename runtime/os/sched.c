@@ -8,6 +8,7 @@
 //
 // Wait semantics follow 3dbrew and fearkov/zakuro (MIT) kernel/svc.rs and sync.rs.
 #include <pthread.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +48,24 @@ static unsigned g_switches;
 void msr_run(Cpu* c, u32 entry, u32 stop);
 extern unsigned msr_trace_pos;
 
-u64 sched_now_ns(void) { return g_now_ns; }
-void sched_advance_ns(u64 ns) { g_now_ns += ns; }
+// Real-time mode (the Switch): the clock is the wall clock, and with every thread waiting the
+// scheduler sleeps until the next event instead of jumping the clock to it.
+int sched_realtime;
+static u64 g_rt_start;
+static u64 wall_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+static void rt_update(void) {
+    if (!sched_realtime) return;
+    if (!g_rt_start) g_rt_start = wall_ns();
+    u64 t = wall_ns() - g_rt_start;
+    if (t > g_now_ns) g_now_ns = t;
+}
+
+u64 sched_now_ns(void) { rt_update(); return g_now_ns; }
+void sched_advance_ns(u64 ns) { if (!sched_realtime) g_now_ns += ns; else rt_update(); }
 Cpu* sched_current_cpu(void) { return g_cur ? &g_cur->cpu : 0; }
 u32 sched_current_id(void) { return g_cur ? g_cur->id : 0; }
 
@@ -187,9 +204,12 @@ void sched_add_timer(u64 period_ns, void (*fn)(void)) {
 // Fires every timer that is due. Returns how many fired.
 int sched_poll_timers(void) {
     int fired = 0;
+    rt_update();
     for (int k = 0; k < g_ntimers; k++)
         while (g_timers[k].next <= g_now_ns) {
             g_timers[k].next += g_timers[k].period;
+            if (sched_realtime && g_timers[k].next <= g_now_ns)   // running late: drop the missed ones
+                g_timers[k].next = g_now_ns + g_timers[k].period;
             g_timers[k].fn();
             fired++;
         }
@@ -221,6 +241,17 @@ void sched_switch(void) {
                 msr_receipt("probe: game time limit reached with every thread waiting");
                 dump_threads();
                 msr_fatal(&me->cpu, "time limit");
+            }
+            u64 target = soonest && (!tn || soonest < tn) ? soonest : tn;
+            if (sched_realtime && target) {   // sleep (holding the baton: nothing else can run) until then
+                rt_update();
+                if (target > g_now_ns) {
+                    u64 d = target - g_now_ns;
+                    struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
+                    nanosleep(&ts, 0);
+                }
+                rt_update();
+                if (g_now_ns < target) g_now_ns = target;
             }
             if (tn && (!soonest || tn < soonest)) {
                 if (tn > g_now_ns) g_now_ns = tn;
@@ -280,6 +311,12 @@ void sched_init_main(Cpu* main_cpu, int prio) {
 
 Cpu* sched_main_cpu(void) { return &g_threads[0].cpu; }
 
+// The Switch runs the main guest thread on its own host thread (for a big stack): the thread that
+// called sched_init_main lets go of the baton, the game thread takes it.
+void sched_handoff_main(void) { pthread_mutex_unlock(&g_baton); }
+void sched_enter_main(void) { pthread_mutex_lock(&g_baton); }
+size_t sched_thread_stack = 8u << 20;
+
 u32 sched_create_thread(Cpu* c, u32 prio, u32 entry, u32 arg, u32 stack_top, s32 core) {
     int k;
     for (k = 1; k < MAX_THREADS; k++) if (g_threads[k].state == T_FREE) break;
@@ -300,7 +337,7 @@ u32 sched_create_thread(Cpu* c, u32 prio, u32 entry, u32 arg, u32 stack_top, s32
     pthread_cond_init(&t->cv, 0);
     pthread_attr_t at;
     pthread_attr_init(&at);
-    pthread_attr_setstacksize(&at, 8u << 20);   // generated code uses large frames
+    pthread_attr_setstacksize(&at, sched_thread_stack);   // generated code uses large frames
     pthread_create(&t->host, &at, thread_main, t);
     pthread_attr_destroy(&at);
     msr_receipt("thread: created thread %u at %08X (arg %08X, stack %08X, prio %X, core %d) -> %X",

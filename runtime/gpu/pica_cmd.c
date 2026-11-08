@@ -57,7 +57,13 @@ static void uniform_word(ShaderUnit* u, u32 word) {
 
 static const u32 k_attr_size[4] = {1, 1, 2, 4};
 
-static void load_attributes(u32 index, Vec4* in) {
+int (*pica_draw_hook)(int indexed);
+void (*pica_sync_hook)(u32 vaddr, u32 size);
+void (*pica_invalidate_hook)(u32 vaddr, u32 size);
+void (*pica_fill_hook)(u32 start, u32 end, u32 value, u32 width);
+unsigned pica_program_version;
+
+void pica_load_attributes(u32 index, Vec4* in) {
     const u32* r = g_pica.reg;
     u32 base = r[0x200] << 3;
     u64 fmt = (u64)r[0x201] | ((u64)(r[0x202] & 0xFFFF) << 32);
@@ -112,7 +118,7 @@ static void shade(u32 index, PicaVertex* out) {
     Vec4 in[16], o[16];
     memset(in, 0, sizeof in);
     memset(o, 0, sizeof o);
-    load_attributes(index, in);
+    pica_load_attributes(index, in);
     pica_shader_run(&g_pica.vs, g_pica.reg + 0x2B0, in, o);
     pica_map_outputs(o, out);
 }
@@ -142,6 +148,7 @@ static void draw(int indexed) {
     u32 n = r[0x228], first = r[0x22A];
     if (n > MAX_DRAW) n = MAX_DRAW;
     g_pica.draws++;
+    if (pica_draw_hook && pica_draw_hook(indexed)) { g_pica.vertices += n; if (indexed) g_pica.draws_indexed++; return; }
     if (indexed) g_pica.draws_indexed++;
     g_pica.vertices += n;
     if ((r[0x229] & 3) == 2) g_pica.gs_draws++;
@@ -170,7 +177,7 @@ static void draw(int indexed) {
     if (g_pica.draws <= 40) {
         Vec4 in[16];
         memset(in, 0, sizeof in);
-        load_attributes(indexed ? 0 : first, in);
+        pica_load_attributes(indexed ? 0 : first, in);
         msr_log("draw %u: %u vertices, prim %X, in0 %g %g %g %g in1 %g %g %g %g -> pos %g %g %g %g color %g %g %g %g uv %g %g",
                 g_pica.draws, n, r[0x25E], in[0].x, in[0].y, in[0].z, in[0].w, in[1].x, in[1].y, in[1].z, in[1].w,
                 g_verts[0].pos.x, g_verts[0].pos.y, g_verts[0].pos.z, g_verts[0].pos.w,
@@ -225,11 +232,13 @@ static void write_reg(u32 id, u32 value, u32 mask) {
             return;
         case 0x1B: u->program_pos = value & 0xFFF; if (mirror) g_pica.gs.program_pos = u->program_pos; return;
         case 0x1C: case 0x1D: case 0x1E: case 0x1F: case 0x20: case 0x21: case 0x22: case 0x23:
+            pica_program_version++;
             if (u->program_pos < 4096) u->program[u->program_pos++] = value;
             if (mirror && g_pica.gs.program_pos < 4096) g_pica.gs.program[g_pica.gs.program_pos++] = value;
             return;
         case 0x25: u->swizzle_pos = value & 0x7F; if (mirror) g_pica.gs.swizzle_pos = u->swizzle_pos; return;
         case 0x26: case 0x27: case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D:
+            pica_program_version++;
             if (u->swizzle_pos < 128) u->swizzle[u->swizzle_pos++] = value;
             if (mirror && g_pica.gs.swizzle_pos < 128) g_pica.gs.swizzle[g_pica.gs.swizzle_pos++] = value;
             return;

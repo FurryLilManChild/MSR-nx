@@ -267,6 +267,7 @@ static int fs_file(Ipc* q, KObject* o) {
             u32 want = left < size ? (u32)left : size;
             seek64(f->fp, f->base + off);
             got = (u32)fread(g_mem + dst, 1, want, f->fp);
+            { extern void (*pica_invalidate_hook)(u32, u32); if (pica_invalidate_hook) pica_invalidate_hook(dst, got); }
         }
         msr_log("fs: read %X bytes at %llX -> %08X (%X read)", size, (unsigned long long)off, dst, got);
         ipc_set(q, 0, IPC_HDR(0x0802, 2, 2));

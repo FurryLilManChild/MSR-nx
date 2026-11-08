@@ -160,7 +160,9 @@ static void gx_command(u32 entry) {
     if (id < 8) msr_gx_counts[id]++;
     switch (id) {
     case 0x00:  // RequestDma(source, destination, size)
+        if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
         if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
+        if (pica_invalidate_hook) pica_invalidate_hook(d[1], d[2]);
         msr_log("gx: dma %08X -> %08X size %X", d[0], d[1], d[2]);
         gsp_interrupt(IRQ_DMA);
         break;
@@ -173,6 +175,7 @@ static void gx_command(u32 entry) {
         for (int b = 0; b < 2; b++) {
             u32 start = d[b * 3], value = d[b * 3 + 1], end = d[b * 3 + 2];
             if (!start || end <= start) continue;
+            if (pica_fill_hook) pica_fill_hook(start, end, value, (d[6] >> (16 * b + 8)) & 3);
             u32 ctl = d[6] >> (16 * b), width = (ctl >> 8) & 3;   // bit 8: 24 bit, bit 9: 32 bit, neither: 16
             if (width == 0) for (u32 a = start; a + 2 <= end; a += 2) wr16(a, (u16)value);
             else if (width & 2) for (u32 a = start; a + 4 <= end; a += 4) wr32(a, value);
@@ -183,12 +186,20 @@ static void gx_command(u32 entry) {
         break;
     case 0x03:  // DisplayTransfer(input, output, input size, output size, flags)
         msr_log("gx: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]);
+        if (pica_sync_hook) pica_sync_hook(d[0], (d[2] & 0xFFFF) * (d[2] >> 16) * 4);
         pica_display_transfer(d[0], d[1], d[2], d[3], d[4]);
+        if (pica_invalidate_hook) pica_invalidate_hook(d[1], (d[3] & 0xFFFF) * (d[3] >> 16) * 4);
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x04:  // TextureCopy(input, output, size, input gap, output gap, flags)
         msr_log("gx: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]);
-        pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]);
+        {
+            u32 iw = (d[3] & 0xFFFF) * 16, ig = (d[3] >> 16) * 16, ow = (d[4] & 0xFFFF) * 16, og = (d[4] >> 16) * 16;
+            u32 in_span = iw ? d[2] + d[2] / iw * ig : d[2], out_span = ow ? d[2] + d[2] / ow * og : d[2];
+            if (pica_sync_hook) pica_sync_hook(d[0], in_span);
+            pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]);
+            if (pica_invalidate_hook) pica_invalidate_hook(d[1], out_span);
+        }
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x05:  // FlushCacheRegions

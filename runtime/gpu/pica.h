@@ -52,6 +52,15 @@ typedef struct {
 } PicaVertex;
 
 void pica_run_list(u32 vaddr, u32 size);
+void pica_load_attributes(u32 index, Vec4* in);
+
+// GPU renderer hooks (the Switch's deko3d renderer); unset in the probe, which draws on the CPU.
+extern int (*pica_draw_hook)(int indexed);                  // returns 1 if it drew
+extern void (*pica_sync_hook)(u32 vaddr, u32 size);         // before the CPU reads guest memory the GPU may have drawn
+extern void (*pica_invalidate_hook)(u32 vaddr, u32 size);   // after the CPU wrote guest memory the GPU may hold
+extern void (*pica_fill_hook)(u32 start, u32 end, u32 value, u32 width);
+extern float pica_lut[24][256][2];
+extern unsigned pica_lut_version, pica_program_version;
 float pica_f24(u32 v);
 // Runs the vertex shader for one vertex: inputs v0..v15, writes the outputs o0..o15.
 void pica_shader_run(ShaderUnit* u, const u32* reg_block, const Vec4* in, Vec4* out);

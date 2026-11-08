@@ -9,6 +9,9 @@
 #include "msr_log.h"
 #include "sched.h"
 
+void dsp_audio_frame(void);
+void dsp_audio_reset(void);
+
 #define DSP_RAM 0x1FF00000u   // where the DSP's memory appears to the application
 
 enum { PIPE_AUDIO = 2, PIPE_BINARY = 3, PIPE_COUNT = 8 };
@@ -58,8 +61,6 @@ static void write_pipe(u32 channel, u32 src, u32 size) {
 }
 
 // The audio firmware finishes a frame of 160 samples at 32728 Hz and signals.
-void dsp_audio_frame(void);
-void dsp_audio_reset(void);
 static void dsp_frame(void) {
     if (g_dsp.running) { dsp_audio_frame(); signal_semaphore(); }
 }

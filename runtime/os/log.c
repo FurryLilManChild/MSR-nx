@@ -7,11 +7,12 @@
 
 static FILE* g_log;
 static FILE* g_receipt;
+int msr_full_log = 1;   // the detailed msr.log; the Switch build turns it off unless asked for
 
 void msr_log_open(const char* dir) {
     char path[512];
     snprintf(path, sizeof path, "%s/msr.log", dir);
-    g_log = fopen(path, "w");
+    if (msr_full_log) g_log = fopen(path, "w");
     snprintf(path, sizeof path, "%s/receipt.txt", dir);
     g_receipt = fopen(path, "w");
 }

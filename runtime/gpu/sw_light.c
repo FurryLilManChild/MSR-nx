@@ -7,7 +7,9 @@
 #include "pica.h"
 
 // 24 lookup tables of 256 entries: value and difference to the next entry.
-static float g_lut[24][256][2];
+float pica_lut[24][256][2];
+unsigned pica_lut_version;
+#define g_lut pica_lut
 
 void pica_light_lut_write(u32 value) {
     u32* r = g_pica.reg;
@@ -16,6 +18,7 @@ void pica_light_lut_write(u32 value) {
     if (table < 24) {
         float step = ((value >> 12) & 0x7FF) / 2047.0f;
         if (value & (1u << 23)) step = -step;
+        pica_lut_version++;
         g_lut[table][entry][0] = (value & 0xFFF) / 4095.0f;
         g_lut[table][entry][1] = step;
     }
