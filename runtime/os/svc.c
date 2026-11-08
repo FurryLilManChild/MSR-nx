@@ -13,9 +13,8 @@
 #include "msr_log.h"
 #include "msr_mem.h"
 
-#define MAX_HANDLES 1024
-static char g_handle_name[MAX_HANDLES][16];
-static u32 g_next_handle = 0x100;
+#include "hle.h"
+
 static u32 g_heap_used, g_linear_used;
 static unsigned g_svc_count, g_ipc_count;
 static unsigned g_svc_hist[0x80];
@@ -23,15 +22,20 @@ unsigned msr_svc_limit = 20000;
 u64 msr_ticks;          // advanced by the probe clock
 
 static u32 new_handle(const char* name) {
-    u32 h = g_next_handle++;
-    if (h < MAX_HANDLES) snprintf(g_handle_name[h], sizeof g_handle_name[h], "%s", name);
-    return h;
+    static const struct { const char* name; int type; } kinds[] = {
+        {"event", OBJ_EVENT}, {"mutex", OBJ_MUTEX}, {"thread", OBJ_THREAD},
+        {"memblock", OBJ_MEMBLOCK}, {"arbiter", OBJ_ARBITER}, {"reslimit", OBJ_RESLIMIT},
+    };
+    for (unsigned k = 0; k < sizeof kinds / sizeof kinds[0]; k++)
+        if (!strcmp(name, kinds[k].name)) return k_new(kinds[k].type, name);
+    return k_new(OBJ_SESSION, name);   // ports and services
 }
 
 static const char* handle_name(u32 h) {
     if (h == 0xFFFF8000u) return "current-process";
     if (h == 0xFFFF8001u) return "current-thread";
-    return h < MAX_HANDLES && g_handle_name[h][0] ? g_handle_name[h] : "?";
+    KObject* o = k_get(h);
+    return o ? o->name : "?";
 }
 
 static void read_cstr(u32 addr, char* out, int n) {
@@ -50,20 +54,15 @@ static void ipc(Cpu* c, u32 handle) {
     u32 cmd = hdr >> 16;
     const char* svc_name = handle_name(handle);
     g_ipc_count++;
-    if (!strcmp(svc_name, "srv:")) {
-        if (cmd == 0x0001) {  // RegisterClient
-            msr_log("ipc srv: RegisterClient");
-            wr32(buf, 0x00010040); wr32(buf + 4, 0);
-            return;
-        }
-        if (cmd == 0x0005) {  // GetServiceHandle(name[8], length, flags)
-            char name[9] = {0};
-            for (int k = 0; k < 8; k++) name[k] = (char)rd8(buf + 4 + k);
-            u32 h = new_handle(name);
-            msr_receipt("service: %s -> handle %X", name, h);
-            wr32(buf, 0x00050042); wr32(buf + 4, 0); wr32(buf + 8, 0); wr32(buf + 12, h);
-            return;
-        }
+    Ipc q = {c, buf, cmd, handle};
+    int done = 0;
+    if (!strcmp(svc_name, "srv:")) done = svc_srv(&q);
+    else if (!strncmp(svc_name, "APT:", 4)) done = svc_apt(&q);
+    else if (!strncmp(svc_name, "hid:", 4)) done = svc_hid(&q);
+    else if (!strcmp(svc_name, "gsp::Gpu")) done = svc_gsp(&q);
+    if (done) {
+        msr_log("ipc %s cmd %04X handled", svc_name, cmd);
+        return;
     }
     u32 normal = (hdr >> 6) & 0x3F, translate = hdr & 0x3F;
     char args[160] = {0};
@@ -149,13 +148,17 @@ void msr_svc(Cpu* c, u32 imm) {
     case 0x1E: r[0] = 0; r[1] = new_handle("memblock"); return;
     case 0x1F:  // MapMemoryBlock(handle, addr, perm, other perm)
         msr_receipt("memory: MapMemoryBlock %X (%s) at %08X", r[0], handle_name(r[0]), r[1]);
-        if (r[1]) msr_mem_map(r[1], 0x10000, MSR_PERM_RW, MSR_STATE_SHARED, handle_name(r[0]));
+        if (r[1]) {
+            KObject* o = k_get(r[0]);
+            u32 size = o && o->size ? o->size : 0x10000;
+            msr_mem_map(r[1], size, MSR_PERM_RW, MSR_STATE_SHARED, handle_name(r[0]));
+        }
         r[0] = 0;
         return;
     case 0x20: r[0] = 0; return;
     case 0x21: r[0] = 0; r[1] = new_handle("arbiter"); return;
     case 0x22: r[0] = 0; return;
-    case 0x23: r[0] = 0; return;
+    case 0x23: k_close(r[0]); r[0] = 0; return;
     case 0x24:  // WaitSynchronization1
         msr_log("svc WaitSynchronization1 %X (%s) (stand-in: signalled)", r[0], handle_name(r[0]));
         r[0] = 0;
@@ -163,7 +166,7 @@ void msr_svc(Cpu* c, u32 imm) {
     case 0x25:  // WaitSynchronizationN -> r1 = index
         r[0] = 0; r[1] = 0;
         return;
-    case 0x27: r[0] = 0; r[1] = new_handle(handle_name(r[1])); return;
+    case 0x27: r[0] = 0; r[1] = k_dup(r[1]); return;
     case 0x28:  // GetSystemTick
         msr_ticks += 268111856ull / 1000;  // the probe clock moves 1 ms per read
         r[0] = (u32)msr_ticks; r[1] = (u32)(msr_ticks >> 32);
