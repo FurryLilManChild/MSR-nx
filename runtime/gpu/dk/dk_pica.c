@@ -86,6 +86,36 @@ static u32 morton(u32 x, u32 y) {
 }
 static u32 tiled(u32 x, u32 y, u32 w) { return (y & ~7u) * w + (x & ~7u) * 8 + morton(x & 7, y & 7); }
 
+// RGBA8 render targets, the common case: a guest pixel is the byte-reversed image pixel. These walk
+// the picture 8x8 tile by tile instead of converting pixel by pixel through the format switch.
+static u8 g_morton[64];
+static void rgba8_detile(const u8* src, u8* dst, u32 w, u32 h) {   // guest tiled -> image rows, row y = tiled row h-1-y
+    if (!g_morton[1]) for (u32 i = 0; i < 64; i++) g_morton[i] = (u8)morton(i & 7, i >> 3);
+    const u32* s = (const u32*)src;
+    u32* d = (u32*)dst;
+    for (u32 ty = 0; ty < h; ty += 8)
+        for (u32 tx = 0; tx < w; tx += 8) {
+            const u32* tile = s + ty * w + tx * 8;
+            for (u32 i = 0; i < 64; i++) {
+                u32 x = tx + (i & 7), y = ty + (i >> 3);
+                d[(h - 1 - y) * w + x] = __builtin_bswap32(tile[g_morton[i]]);
+            }
+        }
+}
+static void rgba8_tile(const u8* src, u8* dst, u32 w, u32 h) {     // image rows -> guest tiled
+    if (!g_morton[1]) for (u32 i = 0; i < 64; i++) g_morton[i] = (u8)morton(i & 7, i >> 3);
+    const u32* s = (const u32*)src;
+    u32* d = (u32*)dst;
+    for (u32 ty = 0; ty < h; ty += 8)
+        for (u32 tx = 0; tx < w; tx += 8) {
+            u32* tile = d + ty * w + tx * 8;
+            for (u32 i = 0; i < 64; i++) {
+                u32 x = tx + (i & 7), y = ty + (i >> 3);
+                tile[g_morton[i]] = __builtin_bswap32(s[(h - 1 - y) * w + x]);
+            }
+        }
+}
+
 // Guest (PICA tiled, any color format) -> RGBA8 rows, row 0 = bottom.
 static void decode_color_px(const u8* p, u32 fmt, u8* o) {
     u16 h;
@@ -110,10 +140,13 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 
 static void surf_upload(Surf* s) {
     if (s->depth) { s->cpu_dirty = 0; return; }   // depth only ever comes from clears
+    MSR_PERF_BEGIN(PERF_SURF_UPLOAD);
     u32 off = dyn_alloc(s->w * s->h * 4, 256);
     u8* dst = g_dyn_cpu + off;
     const u8* src = g_mem + s->addr;
     u32 bpp = k_bpp[s->fmt];
+    if (s->fmt == 0 && !(s->w & 7) && !(s->h & 7)) rgba8_detile(src, dst, s->w, s->h);
+    else
     for (u32 y = 0; y < s->h; y++)
         for (u32 x = 0; x < s->w; x++)
             decode_color_px(src + tiled(x, s->h - 1 - y, s->w) * bpp, s->fmt, dst + (y * s->w + x) * 4);
@@ -123,10 +156,12 @@ static void surf_upload(Surf* s) {
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &v, &r, 0);
     s->cpu_dirty = 0;
+    MSR_PERF_END(PERF_SURF_UPLOAD);
 }
 
 static void surf_readback(Surf* s) {
     if (s->depth || !s->gpu_dirty) { s->gpu_dirty = 0; return; }
+    MSR_PERF_BEGIN(PERF_READBACK);
     u32 off = dyn_alloc(s->w * s->h * 4, 256);
     DkImageView v;
     dkImageViewDefaults(&v, &s->img);
@@ -140,10 +175,13 @@ static void surf_readback(Surf* s) {
     const u8* src = g_dyn_cpu + off;
     u8* dst = g_mem + s->addr;
     u32 bpp = k_bpp[s->fmt];
+    if (s->fmt == 0 && !(s->w & 7) && !(s->h & 7)) rgba8_tile(src, dst, s->w, s->h);
+    else
     for (u32 y = 0; y < s->h; y++)
         for (u32 x = 0; x < s->w; x++)
             encode_color_px(dst + tiled(x, s->h - 1 - y, s->w) * bpp, s->fmt, src + (y * s->w + x) * 4);
     s->gpu_dirty = 0;
+    MSR_PERF_END(PERF_READBACK);
 }
 
 static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
@@ -329,8 +367,10 @@ static DkImage* tex_get(u32 paddr, u32 fmt, u32 w, u32 h) {
     }
     hit->hash = hs;
     hit->checked_frame = g_frame;
+    MSR_PERF_BEGIN(PERF_TEX_UPLOAD);
     u32 off = dyn_alloc(w * h * 4, 256);
     decode_texture(g_mem + v, fmt, w, h, g_dyn_cpu + off);
+    MSR_PERF_END(PERF_TEX_UPLOAD);
     DkImageView iv;
     dkImageViewDefaults(&iv, &hit->img);
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
@@ -361,7 +401,7 @@ static void flush(int wait) {
     mutexLock(g_qlock);
     dkQueueSubmitCommands(g_q, dkCmdBufFinishList(g_cmd));
     dkQueueFlush(g_q);
-    if (wait) dkQueueWaitIdle(g_q);
+    if (wait) { MSR_PERF_BEGIN(PERF_GPU_WAIT); dkQueueWaitIdle(g_q); MSR_PERF_END(PERF_GPU_WAIT); }
     mutexUnlock(g_qlock);
     if (wait) {
         dkCmdBufClear(g_cmd);
@@ -474,12 +514,14 @@ static int dk_draw(int indexed) {
     if (((g_dyn_pos + 255) & ~255u) + need > DYN_SIZE) flush(1);
     u32 voff = dyn_alloc(count * stride * 16, 256);
     float* vdst = (float*)(g_dyn_cpu + voff);
+    MSR_PERF_BEGIN(PERF_VERTEX);
     for (u32 i = 0; i < count; i++) {
         Vec4 in[16];
         for (u32 k = 0; k < stride; k++) in[k] = (Vec4){0, 0, 0, 1};
         pica_load_attributes(lo + i, in);
         memcpy(vdst + i * stride * 4, in, stride * 16);
     }
+    MSR_PERF_END(PERF_VERTEX);
     u32 ioff = 0;
     if (indexed) {
         ioff = dyn_alloc(n * 2, 4);

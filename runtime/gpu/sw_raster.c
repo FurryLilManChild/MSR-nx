@@ -564,6 +564,68 @@ void draw_body(const PicaVertex* v, unsigned count) {
 
 // ---- display transfer, texture copy, frame output ----------------------------------------------
 
+// Display transfer: converts a picture between formats and between tiled and linear layout, with an
+// optional 2x1 or 2x2 box downscale and a vertical flip. This runs every frame (several times, for the
+// game's bloom chain and its screen output), so it works on 8-bit integers rather than the float
+// colors the rasterizer uses. Colors are widened to 8 bits exactly as decode_color plus encode_color
+// would round them, so a transfer without downscaling gives the same bytes as the float version.
+static u8 k_x5[32], k_x6[64], k_x4[16];
+static u8 k_morton[64];
+static void transfer_tables(void) {
+    if (k_morton[1]) return;
+    for (u32 v = 0; v < 32; v++) k_x5[v] = (u8)(v / 31.f * 255 + 0.5f);
+    for (u32 v = 0; v < 64; v++) k_x6[v] = (u8)(v / 63.f * 255 + 0.5f);
+    for (u32 v = 0; v < 16; v++) k_x4[v] = (u8)(v / 15.f * 255 + 0.5f);
+    for (u32 y = 0; y < 8; y++)
+        for (u32 x = 0; x < 8; x++) k_morton[y * 8 + x] = (u8)morton(x, y);
+}
+static inline u32 tiled_fast(u32 x, u32 y, u32 width) {
+    return (y & ~7u) * width + (x & ~7u) * 8 + k_morton[(y & 7) * 8 + (x & 7)];
+}
+// to r, g, b, a in 8 bits each
+static inline void px_read(const u8* p, u32 fmt, u32 c[4]) {
+    u16 h;
+    switch (fmt) {
+    case 0: c[0] = p[3]; c[1] = p[2]; c[2] = p[1]; c[3] = p[0]; break;
+    case 1: c[0] = p[2]; c[1] = p[1]; c[2] = p[0]; c[3] = 255; break;
+    case 2: memcpy(&h, p, 2); c[0] = k_x5[(h >> 11) & 31]; c[1] = k_x5[(h >> 6) & 31]; c[2] = k_x5[(h >> 1) & 31]; c[3] = (h & 1) ? 255 : 0; break;
+    case 3: memcpy(&h, p, 2); c[0] = k_x5[(h >> 11) & 31]; c[1] = k_x6[(h >> 5) & 63]; c[2] = k_x5[h & 31]; c[3] = 255; break;
+    default: memcpy(&h, p, 2); c[0] = k_x4[(h >> 12) & 15]; c[1] = k_x4[(h >> 8) & 15]; c[2] = k_x4[(h >> 4) & 15]; c[3] = k_x4[h & 15]; break;
+    }
+}
+static inline void px_write(u8* p, u32 fmt, const u32 c[4]) {
+    u32 r = c[0], g = c[1], b = c[2], a = c[3];
+    u16 h;
+    switch (fmt) {
+    case 0: p[0] = (u8)a; p[1] = (u8)b; p[2] = (u8)g; p[3] = (u8)r; break;
+    case 1: p[0] = (u8)b; p[1] = (u8)g; p[2] = (u8)r; break;
+    case 2: h = (u16)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7)); memcpy(p, &h, 2); break;
+    case 3: h = (u16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)); memcpy(p, &h, 2); break;
+    default: h = (u16)(((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4)); memcpy(p, &h, 2); break;
+    }
+}
+
+// The body, written once; the calls below pass constants for the common cases so the compiler
+// builds a separate loop for each without the per-pixel format switches.
+static inline __attribute__((always_inline)) void transfer_body(const u8* in, u8* out, u32 iw, u32 ow, u32 cw,
+        u32 ch, int flip, int in_linear, int out_tiled, u32 fi, u32 fo, u32 sx, u32 sy) {
+    u32 bi = k_fb_bpp[fi], bo = k_fb_bpp[fo], n = sx * sy, half = n / 2;
+    for (u32 y = 0; y < ch; y++) {
+        u32 dy = flip ? ch - 1 - y : y;
+        for (u32 x = 0; x < cw; x++) {
+            u32 acc[4] = {0, 0, 0, 0}, c[4];
+            for (u32 j = 0; j < sy; j++)
+                for (u32 i = 0; i < sx; i++) {
+                    u32 xx = x * sx + i, yy = y * sy + j;
+                    px_read(in + (in_linear ? yy * iw + xx : tiled_fast(xx, yy, iw)) * bi, fi, c);
+                    acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2]; acc[3] += c[3];
+                }
+            if (n > 1) for (int k = 0; k < 4; k++) acc[k] = (acc[k] + half) / n;
+            px_write(out + (out_tiled ? tiled_fast(x, dy, ow) : dy * ow + x) * bo, fo, acc);
+        }
+    }
+}
+
 void pica_display_transfer(u32 in_v, u32 out_v, u32 in_dim, u32 out_dim, u32 flags) {
     u32 iw = in_dim & 0xFFFF, ih = in_dim >> 16;
     int flip = flags & 1, in_linear = (flags >> 1) & 1, same = (flags >> 5) & 1;
@@ -573,25 +635,18 @@ void pica_display_transfer(u32 in_v, u32 out_v, u32 in_dim, u32 out_dim, u32 fla
     u32 ow = (out_dim & 0xFFFF) / sx, oh = (out_dim >> 16) / sy;
     u32 cw = ow < iw / sx ? ow : iw / sx, ch = oh < ih / sy ? oh : ih / sy;
     if (!in_v || !out_v || fi > 4 || fo > 4) return;
-    u8* in = g_mem + in_v;
+    transfer_tables();
+    const u8* in = g_mem + in_v;
     u8* out = g_mem + out_v;
-    u32 bi = k_fb_bpp[fi], bo = k_fb_bpp[fo];
-    for (u32 y = 0; y < ch; y++)
-        for (u32 x = 0; x < cw; x++) {
-            Color acc = {0, 0, 0, 0};
-            for (u32 j = 0; j < sy; j++)
-                for (u32 i = 0; i < sx; i++) {
-                    u32 xx = x * sx + i, yy = y * sy + j;
-                    u32 o = in_linear ? yy * iw + xx : tiled_offset(xx, yy, iw);
-                    Color c = decode_color(in + o * bi, fi);
-                    acc.r += c.r; acc.g += c.g; acc.b += c.b; acc.a += c.a;
-                }
-            float n = (float)(sx * sy);
-            acc.r /= n; acc.g /= n; acc.b /= n; acc.a /= n;
-            u32 dy = flip ? ch - 1 - y : y;
-            u32 o = out_tiled ? tiled_offset(x, dy, ow) : dy * ow + x;
-            encode_color(out + o * bo, fo, acc);
-        }
+    // the cases this game uses every frame: its bloom chain and its screen output
+    if (!in_linear && out_tiled && fi == 0 && fo == 0 && sx == 2 && sy == 2)
+        transfer_body(in, out, iw, ow, cw, ch, flip, 0, 1, 0, 0, 2, 2);
+    else if (!in_linear && !out_tiled && fi == 0 && fo == 1 && sx == 1 && sy == 1)
+        transfer_body(in, out, iw, ow, cw, ch, flip, 0, 0, 0, 1, 1, 1);
+    else if (!in_linear && !out_tiled && fi == 0 && fo == 0 && sx == 1 && sy == 1)
+        transfer_body(in, out, iw, ow, cw, ch, flip, 0, 0, 0, 0, 1, 1);
+    else
+        transfer_body(in, out, iw, ow, cw, ch, flip, in_linear, out_tiled, fi, fo, sx, sy);
 }
 
 int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);

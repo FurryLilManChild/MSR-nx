@@ -60,3 +60,22 @@ void msr_log_close(void) {
     if (g_receipt) fclose(g_receipt);
     g_log = g_receipt = 0;
 }
+
+unsigned long long msr_perf_ns[PERF_COUNT];
+unsigned msr_perf_n[PERF_COUNT];
+
+void msr_perf_report(double seconds) {
+    static const char* names[PERF_COUNT] = {"transfers", "copies", "readbacks", "surface uploads",
+                                            "texture uploads", "vertex fetch", "GPU waits", "present"};
+    char line[512];
+    int n = 0;
+    for (int k = 0; k < PERF_COUNT; k++) {
+        if (!msr_perf_n[k]) continue;
+        n += snprintf(line + n, sizeof line - n, "%s%s %u in %.0f ms", n ? ", " : "", names[k], msr_perf_n[k],
+                      msr_perf_ns[k] / 1e6);
+        if (n >= (int)sizeof line) break;
+        msr_perf_ns[k] = 0;
+        msr_perf_n[k] = 0;
+    }
+    msr_receipt("  time per %.1f s: %s", seconds, n ? line : "(nothing measured)");
+}

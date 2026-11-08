@@ -166,6 +166,11 @@ void dkr_frame_end(void);
 static int g_gpu_render;
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
+    // only convert the screens when the game showed a new picture on one of them
+    static unsigned seen[2] = {~0u, ~0u};
+    if (msr_fb[0].swaps == seen[0] && msr_fb[1].swaps == seen[1]) return;
+    seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
+    MSR_PERF_BEGIN(PERF_PRESENT);
     convert_screen(0, g_upload);
     convert_screen(1, g_upload + 400 * 240);
     mutexLock(&g_qlock);
@@ -194,6 +199,7 @@ static void present(void) {
     dkQueueWaitIdle(g_queue);
     mutexUnlock(&g_qlock);
     dkCmdBufClear(g_cmd);
+    MSR_PERF_END(PERF_PRESENT);
 }
 
 // ---- audio: the DSP's 32728 Hz mix, resampled to 48 kHz -----------------------------------------
@@ -243,6 +249,7 @@ static void* audio_thread(void* arg) {
 // ---- input ------------------------------------------------------------------------------------------
 
 static PadState g_pad;
+static unsigned long long g_start_ns;
 
 static void input_poll(void) {
     padUpdate(&g_pad);
@@ -260,6 +267,15 @@ static void input_poll(void) {
     if (k & HidNpadButton_L) b |= 1 << 9;
     if (k & HidNpadButton_X) b |= 1 << 10;
     if (k & HidNpadButton_Y) b |= 1 << 11;
+    // the first presses go to the receipt, to check that the game is being told about them
+    static u32 last_b;
+    static unsigned logged;
+    if (b != last_b && logged < 60) {
+        logged++;
+        msr_receipt("input: buttons %03X at %.1f s (game has shown %u top-screen pictures)", b,
+                    (msr_now_ns() - g_start_ns) / 1e9, msr_fb[0].swaps);
+    }
+    last_b = b;
     msr_buttons = b;
     HidAnalogStickState s = padGetStickPos(&g_pad, 0);
     msr_circle_x = (s16)(s.x * 156 / 32767);
@@ -283,7 +299,7 @@ int main(int argc, char** argv) {
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log
     msr_log_open(DIR);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 1 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 2 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -317,9 +333,23 @@ int main(int argc, char** argv) {
     sched_handoff_main();
     pthread_create(&gt, &at, game_main, 0);
 
+    g_start_ns = msr_now_ns();
+    unsigned long long next_report = g_start_ns + 5000000000ull;
+    unsigned last_swaps = 0;
     while (appletMainLoop()) {
         input_poll();
         present();
+        unsigned long long now = msr_now_ns();
+        if (now >= next_report) {
+            // the speed meter: the real 3DS shows up to 60 pictures a second on the top screen
+            double secs = (now - next_report + 5000000000ull) / 1e9;
+            unsigned sw = msr_fb[0].swaps;
+            msr_receipt("speed at %.0f s: %.1f top-screen pictures per second", (now - g_start_ns) / 1e9,
+                        (sw - last_swaps) / secs);
+            msr_perf_report(secs);
+            last_swaps = sw;
+            next_report = now + 5000000000ull;
+        }
         if ((padGetButtons(&g_pad) & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R)) ==
             (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R))
             break;   // L + R + plus + minus: quit

@@ -10,6 +10,7 @@
 #include <string.h>
 #include "msr_log.h"
 #include "pica.h"
+#include <time.h>
 
 Pica g_pica;
 
@@ -143,11 +144,82 @@ static void assemble_and_draw(const PicaVertex* v, unsigned n) {
     if (t) pica_draw_triangles(g_tris, t);
 }
 
+// MSR_VTIME: measures the CPU cost of the GPU renderer's vertex fetch (every vertex a draw uses,
+// decoded once), so speed work can be planned from numbers.
+static int pica_vtime = -1;
+static double g_vtime_ns;
+static unsigned long long g_vtime_verts;
+static void vtime_draw(int indexed) {
+    const u32* r = g_pica.reg;
+    u32 n = r[0x228], first = r[0x22A], lo = first, hi = first + n - 1;
+    if (!n) return;
+    if (indexed) {
+        u32 ib = r[0x227];
+        const u8* idx = pica_ptr((r[0x200] << 3) + (ib & 0x0FFFFFFF));
+        if (!idx) return;
+        int wide = (ib >> 31) & 1;
+        lo = ~0u; hi = 0;
+        for (u32 i = 0; i < n; i++) {
+            u32 v; if (wide) { u16 t; memcpy(&t, idx + 2 * i, 2); v = t; } else v = idx[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    static volatile float sink;
+    for (u32 i = lo; i <= hi; i++) { Vec4 in[16]; pica_load_attributes(i, in); sink += in[0].x; }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    g_vtime_ns += (b.tv_sec - a.tv_sec) * 1e9 + (b.tv_nsec - a.tv_nsec);
+    g_vtime_verts += hi - lo + 1;
+}
+
+// Render-target statistics for planning the GPU renderer's speed work: which surfaces are drawn to,
+// and how often a draw samples a texture that an earlier draw rendered (render to texture).
+#define RT_MAX 64
+static u32 g_rt_addr[RT_MAX], g_rt_wh[RT_MAX], g_rt_draws[RT_MAX], g_rt_sampled[RT_MAX], g_rt_n;
+unsigned pica_stat_rtt_draws, pica_stat_tex_binds, pica_stat_rt_switches;
+static u32 g_last_rt;
+static int rt_find(u32 a) { for (u32 k = 0; k < g_rt_n; k++) if (g_rt_addr[k] == a) return (int)k; return -1; }
+static void rt_stats(void) {
+    const u32* r = g_pica.reg;
+    u32 a = r[0x11D] << 3;
+    u32 wh = r[0x11E];
+    int k = rt_find(a);
+    if (k < 0 && g_rt_n < RT_MAX) { k = (int)g_rt_n++; g_rt_addr[k] = a; g_rt_wh[k] = wh; }
+    if (k >= 0) g_rt_draws[k]++;
+    if (a != g_last_rt) { pica_stat_rt_switches++; g_last_rt = a; }
+    static const u32 addr_reg[3] = {0x85, 0x95, 0x9D};
+    int any = 0;
+    for (int u = 0; u < 3; u++) {
+        if (!((r[0x80] >> u) & 1)) continue;
+        pica_stat_tex_binds++;
+        int t = rt_find(r[addr_reg[u]] << 3);
+        if (t >= 0) { g_rt_sampled[t]++; any = 1; }
+    }
+    if (any) pica_stat_rtt_draws++;
+}
+void pica_rt_summary(void) {
+    if (pica_vtime > 0)
+        msr_receipt("vertex fetch: %llu vertices decoded in %.1f ms of CPU time", g_vtime_verts, g_vtime_ns / 1e6);
+    extern unsigned gx_stat[4];
+    msr_receipt("gx stats: %u DMA, %u fills, %u display transfers, %u texture copies", gx_stat[0], gx_stat[1],
+                gx_stat[2], gx_stat[3]);
+    msr_receipt("gpu stats: %u texture binds, %u draws sample a render target, %u render target switches",
+                pica_stat_tex_binds, pica_stat_rtt_draws, pica_stat_rt_switches);
+    for (u32 k = 0; k < g_rt_n; k++)
+        msr_receipt("  target %08X %ux%u: %u draws, sampled %u times", g_rt_addr[k], g_rt_wh[k] & 0x7FF,
+                    ((g_rt_wh[k] >> 12) & 0x3FF) + 1, g_rt_draws[k], g_rt_sampled[k]);
+}
+
 static void draw(int indexed) {
     const u32* r = g_pica.reg;
     u32 n = r[0x228], first = r[0x22A];
     if (n > MAX_DRAW) n = MAX_DRAW;
     g_pica.draws++;
+    rt_stats();
+    if (pica_vtime < 0) pica_vtime = getenv("MSR_VTIME") ? 1 : 0;
+    if (pica_vtime) vtime_draw(indexed);
     if (pica_draw_hook && pica_draw_hook(indexed)) { g_pica.vertices += n; if (indexed) g_pica.draws_indexed++; return; }
     if (indexed) g_pica.draws_indexed++;
     g_pica.vertices += n;
@@ -280,6 +352,8 @@ void pica_summary(void) {
     msr_receipt("gpu: %u command lists, %u draws (%u indexed, %u with a geometry shader), %u vertices, "
                 "%u immediate vertices, %u triangles rasterized", g_pica.lists, g_pica.draws, g_pica.draws_indexed,
                 g_pica.gs_draws, g_pica.vertices, g_pica.immediate_vertices, msr_sw_triangles);
+    pica_rt_summary();
+    msr_perf_report(0);
 }
 
 void pica_run_list(u32 vaddr, u32 size) {

@@ -154,12 +154,15 @@ static void gsp_interrupt(int id) {
 
 unsigned msr_gx_counts[8];
 
+unsigned gx_stat[4];   // DMA, fills, display transfers, texture copies
+
 static void gx_command(u32 entry) {
     u32 id = rd32(entry) & 0xFF, d[7];
     for (int k = 0; k < 7; k++) d[k] = rd32(entry + 4 + 4 * k);
     if (id < 8) msr_gx_counts[id]++;
     switch (id) {
     case 0x00:  // RequestDma(source, destination, size)
+        gx_stat[0]++;
         if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
         if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
         if (pica_invalidate_hook) pica_invalidate_hook(d[1], d[2]);
@@ -172,6 +175,7 @@ static void gx_command(u32 entry) {
         gsp_interrupt(IRQ_P3D);
         break;
     case 0x02:  // MemoryFill(start0, value0, end0, start1, value1, end1, control)
+        gx_stat[1]++;
         for (int b = 0; b < 2; b++) {
             u32 start = d[b * 3], value = d[b * 3 + 1], end = d[b * 3 + 2];
             if (!start || end <= start) continue;
@@ -185,19 +189,21 @@ static void gx_command(u32 entry) {
         }
         break;
     case 0x03:  // DisplayTransfer(input, output, input size, output size, flags)
+        gx_stat[2]++;
         msr_log("gx: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]);
         if (pica_sync_hook) pica_sync_hook(d[0], (d[2] & 0xFFFF) * (d[2] >> 16) * 4);
-        pica_display_transfer(d[0], d[1], d[2], d[3], d[4]);
+        { MSR_PERF_BEGIN(PERF_TRANSFER); pica_display_transfer(d[0], d[1], d[2], d[3], d[4]); MSR_PERF_END(PERF_TRANSFER); }
         if (pica_invalidate_hook) pica_invalidate_hook(d[1], (d[3] & 0xFFFF) * (d[3] >> 16) * 4);
         gsp_interrupt(IRQ_PPF);
         break;
     case 0x04:  // TextureCopy(input, output, size, input gap, output gap, flags)
+        gx_stat[3]++;
         msr_log("gx: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]);
         {
             u32 iw = (d[3] & 0xFFFF) * 16, ig = (d[3] >> 16) * 16, ow = (d[4] & 0xFFFF) * 16, og = (d[4] >> 16) * 16;
             u32 in_span = iw ? d[2] + d[2] / iw * ig : d[2], out_span = ow ? d[2] + d[2] / ow * og : d[2];
             if (pica_sync_hook) pica_sync_hook(d[0], in_span);
-            pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]);
+            { MSR_PERF_BEGIN(PERF_TEXCOPY); pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]); MSR_PERF_END(PERF_TEXCOPY); }
             if (pica_invalidate_hook) pica_invalidate_hook(d[1], out_span);
         }
         gsp_interrupt(IRQ_PPF);
