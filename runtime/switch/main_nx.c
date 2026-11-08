@@ -153,7 +153,11 @@ static void convert_screen(int screen, u32* out) {
             case 2: r = ((h >> 11) & 31) << 3; g = ((h >> 6) & 31) << 3; b = ((h >> 1) & 31) << 3; break;
             default: r = (h >> 12) << 4; g = ((h >> 8) & 15) << 4; b = ((h >> 4) & 15) << 4; break;
             }
-            out[y * W + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
+            // Rows go in bottom to top: the device uses OriginLowerLeft (the PICA's convention), so
+            // deko3d tells the compositor to flip the whole window vertically (HAL_TRANSFORM_FLIP_V,
+            // deko3d source/dk_swapchain.cpp). Our 2D-engine blits copy rows in memory order, so
+            // the picture has to be stored upside down to come out the right way up.
+            out[(H - 1 - y) * W + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
         }
     }
 }
