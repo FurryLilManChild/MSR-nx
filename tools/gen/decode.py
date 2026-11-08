@@ -58,6 +58,7 @@ class Program:
         for md in (self.md_arm, self.md_thumb):
             md.detail = True
         self.functions = {}
+        self.switch8 = find_switch8_helpers(code, self.text_end)
 
     def word(self, addr):
         return struct.unpack_from('<I', self.code, addr - TEXT_BASE)[0]
@@ -142,6 +143,30 @@ class Program:
         return self
 
 
+# The ARM compiler's Thumb switch helper (__ARM_common_switch8): `blx helper` with the index in
+# r3, followed by a byte table: entry count N at the return address A, then N entries and a default
+# entry. The helper jumps to A + 2 * entry (Thumb). Found by its exact instruction sequence.
+SWITCH8_WORDS = (0xE55EC001, 0xE153000C, 0x27DE300C, 0x37DE3003, 0xE08EC083, 0xE12FFF1C)
+
+
+def find_switch8_helpers(code, text_end):
+    found = set()
+    first = struct.pack('<I', SWITCH8_WORDS[0])
+    i = code.find(first)
+    while 0 <= i < text_end - TEXT_BASE:
+        if i % 4 == 0 and struct.unpack_from('<6I', code, i) == SWITCH8_WORDS:
+            found.add(TEXT_BASE + i)
+        i = code.find(first, i + 1)
+    return found
+
+
+def switch8_targets(ins, prog):
+    """Targets of `blx __ARM_common_switch8` as (index value, target) pairs; the last is default."""
+    a = ins.addr + ins.size
+    n = prog.code[a - TEXT_BASE]
+    return [(a + 2 * prog.code[a + 1 + k - TEXT_BASE], True) for k in range(n + 1)]
+
+
 def writes_pc(ins):
     for op in ins.operands:
         if op.type == A.ARM_OP_REG and op.reg == A.ARM_REG_PC and op.access & capstone.CS_AC_WRITE:
@@ -159,6 +184,8 @@ def classify(ins, prog):
         if ops and ops[0].type == A.ARM_OP_IMM:
             t = ops[0].imm & 0xFFFFFFFF
             thumb = ins.thumb if m == A.ARM_INS_BL else not ins.thumb
+            if m == A.ARM_INS_BLX and ins.thumb and t in prog.switch8:
+                return 'table', switch8_targets(ins, prog)
             return 'call', [(t, thumb)]
         return 'call', []  # indirect call: blx reg
     if m in (A.ARM_INS_B,):

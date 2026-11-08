@@ -113,13 +113,27 @@ class Emit:
             return (imm & 0xFFFFFFFF) >> 31
         return None
 
+    def dp_imm(self):
+        """The immediate of an ARM data-processing instruction, from the encoding. capstone splits
+        a non-canonical rotation (`add r1, pc, #112, #30`) into two operands, and op.imm alone is
+        then the unrotated byte."""
+        if self.ins.thumb:
+            return None
+        word = struct.unpack('<I', self.ins.raw)[0]
+        if (word >> 26) & 3 or not (word >> 25) & 1:
+            return None
+        rot = 2 * ((word >> 8) & 0xF)
+        v = word & 0xFF
+        return ((v >> rot) | (v << (32 - rot))) & 0xFFFFFFFF if rot else v
+
     def operand(self, op, carry=None):
         if op.type == A.ARM_OP_IMM:
             if carry:
                 ic = self.imm_carry()
                 if ic is not None:
                     self.line('%s = %d;' % (carry, ic))
-            return h(op.imm)
+            v = self.dp_imm()
+            return h(op.imm if v is None else v)
         if op.type == A.ARM_OP_REG:
             return self.shifted(op, carry)
         raise Unsupported('operand type %d' % op.type)
@@ -243,7 +257,11 @@ def body(e):
         return
     if i == A.ARM_INS_ADR:
         base = ((ins.addr + 4) & ~3) if ins.thumb else ins.addr + 8
-        e.set_reg(ops[0].reg, h(base + ops[1].imm))
+        off = ops[1].imm
+        if not ins.thumb:   # add/sub rd, pc, #imm: take the value and the sign from the encoding
+            word = struct.unpack('<I', ins.raw)[0]
+            off = e.dp_imm() if ((word >> 21) & 0xF) == 0x4 else -e.dp_imm()
+        e.set_reg(ops[0].reg, h((base + off) & 0xFFFFFFFF))
         return
     if i == A.ARM_INS_MOVW:
         e.set_reg(ops[0].reg, h(ops[1].imm))

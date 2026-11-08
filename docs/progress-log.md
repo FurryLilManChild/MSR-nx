@@ -1,5 +1,40 @@
 # Progress log (newest first)
 
+## 2026-11-07 (night): probes 5 to 9 in the cloud (Claude runs the probe loop)
+
+- Probe 6: native fs:USER (SelfNCCH RomFS from romfs.bin offset 0x1000) and cfg:u; the RomFS opened
+  and read, then the main thread spun in an ldrex/strex lock slow path (F_0018BA84) on an
+  uninitialized lock at 0x7C9D64.
+- Probe 7: thread scheduler (`runtime/os/sched.c`): one host thread per guest thread, a baton so
+  one runs at a time, strict priority (lower number first), handover at kernel calls, events with
+  reset types, recursive mutexes, semaphores, address arbiter wait/signal, sleeps and timeouts on a
+  virtual clock. Worker threads ran, but the spin stayed. Probe 6's guess (workers set the lock up)
+  was wrong.
+- Cause found in the code: F_004271E0 sets the lock up only if F_00428730 succeeds; it returned
+  0xC8A0A801 because the byte at 0x76C9E1 was 0. That byte is the "component loaded" output of
+  dsp::DSP LoadComponent (0x1ADE10 stores reply word 2 there); the stand-in reply gave 0.
+- Probe 8: native dsp::DSP (accepts the firmware upload, audio pipe answers like the firmware,
+  semaphore and interrupt events). Past the lock: 12 threads, gsp RegisterInterruptRelayQueue,
+  GX TriggerCmdReqQueue, then every thread waiting (main on an arbiter, the GSP thread on its
+  interrupt event).
+- Probe 9: periodic hardware events on the virtual clock (vblank 59.83 Hz, DSP frame 4.89 ms), the
+  GSP interrupt relay queue, GX commands (DMA and memory fill done natively; command lists, display
+  transfers and texture copies acknowledged until the renderer exists). Reached hid:USER, then an
+  unexpected return at 0x1010A8: `blx 0x2FE048`, the compiler's Thumb switch helper
+  (__ARM_common_switch8, byte table after the call). Generator now turns it into a switch.
+- Probe 10: crash reading guest address 4 while loading effect assets: the name pointer was wrong.
+  `add r1, pc, #112, #30` (a non-canonical rotated immediate, 654 such ADR forms in the game) was
+  emitted with the unrotated byte. Fixed: data-processing immediates come from the encoding; the
+  instruction test sampler now takes every operand shape (a per-kind cap had hidden this one).
+- Probe 11: the asset loader ran through; then fs OpenArchive save data and a stand-in OpenDirectory
+  led the game to err:f ThrowFatalError. Added a save data archive in a host folder (format,
+  open/create/delete/rename files and folders, directory listing, read/write/size), and err:f now
+  stops the probe with the game's error.
+- Probe 12: the main thread woke every vblank and slept again: it waits for the GSP to take its
+  framebuffer swap (dirty flag in shared memory 0x200). The vblank now latches swaps.
+- Probe 13: the game runs its frame loop: about 278 frames in 20 s of game time, each with 8 GPU
+  command lists, display transfers and swaps on both screens. Next: the PICA200 command processor.
+
 ## 2026-11-07 (evening): probes 1 to 3 on Mark's PC
 
 - Probe 1: the generated code ran from the entry point; the game looped on svc QueryMemory

@@ -253,10 +253,8 @@ def main():
             if sig in seen:
                 continue
             seen.add(sig)
-            sample.append(ins)
+            sample.append(ins)   # every distinct shape, however many (a cap once hid one)
             taken += 1
-            if taken >= per:
-                break
         # plus a few more of the same shapes with other registers
         for ins in lst[:per]:
             if ins not in sample:

@@ -47,6 +47,21 @@ class FnHooks:
             self.unknown(e, 'branch to undecoded %08X' % target)
 
     def call(self, e, target, ret):
+        if e.ins.addr in self.fn.tables:   # blx __ARM_common_switch8: a byte jump table
+            targets = self.fn.tables[e.ins.addr]
+            n = len(targets) - 1
+            e.line('{ u32 sw_i = r3 < %du ? r3 : %du;' % (n, n))
+            e.line('  r3 = (u32)rd8(%s + sw_i); r12 = %s + 2u * r3;'
+                   % (emit.h((ret & ~1) + 1), emit.h(ret)))
+            e.line('  switch (sw_i) {')
+            for k, (x, _) in enumerate(targets):
+                if x in self.fn.insns:
+                    e.line('    case %d: goto L_%08X;' % (k, x))
+            e.line('    default: break;')
+            e.line('  } }')
+            self.unknown(e, 'switch8 table %08X out of range' % e.ins.addr)
+            self.stats['tables'] += 1
+            return
         a = target & ~1
         e.line(regs.sync_out())
         if a in self.prog.entries:

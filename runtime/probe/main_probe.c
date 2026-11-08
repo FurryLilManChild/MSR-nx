@@ -9,6 +9,7 @@
 #include "msr_cpu.h"
 #include "msr_log.h"
 #include "msr_mem.h"
+#include "sched.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -23,6 +24,7 @@ void msr_dump_state(Cpu* c);
 extern unsigned msr_svc_limit;
 
 static Cpu g_cpu;
+char msr_extract_dir[512];
 
 #ifdef MSR_TRACE
 const char* msr_trace_ring[64];
@@ -91,7 +93,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     msr_log_open(argv[2]);
-    msr_receipt("MSR-nx probe 5 (jump tables found up to 16 instructions after their bounds check)");
+    msr_receipt("MSR-nx probe 9 (scheduler, sync objects, dsp, gsp interrupts and GX, switch8 tables)");
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_exception);
 #else
@@ -102,6 +104,8 @@ int main(int argc, char** argv) {
     sigaction(SIGSEGV, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
 #endif
+    snprintf(msr_extract_dir, sizeof msr_extract_dir, "%s", argv[1]);
+    { extern char msr_save_dir[512]; snprintf(msr_save_dir, sizeof msr_save_dir, "%s/save", argv[2]); }
     char path[600];
     size_t code_size = 0, ex_size = 0;
     snprintf(path, sizeof path, "%s/code.bin", argv[1]);
@@ -132,7 +136,9 @@ int main(int argc, char** argv) {
     u32 stack_size = stack ? (stack + 0xFFF) & ~0xFFFu : 0x10000;
     msr_mem_map(MSR_STACK_TOP - stack_size, stack_size, MSR_PERM_RW, MSR_STATE_PRIVATE, "stack");
     msr_mem_map(0x1FF80000u, 0x2000, MSR_PERM_R, MSR_STATE_SHARED, "config+shared page");
-    msr_mem_map(MSR_TLS_BASE, 0x1000, MSR_PERM_RW, MSR_STATE_PRIVATE, "tls");
+    msr_mem_map(0x1F000000u, 0x600000, MSR_PERM_RW, MSR_STATE_SHARED, "vram");
+    msr_mem_map(0x1FF00000u, 0x80000, MSR_PERM_RW, MSR_STATE_SHARED, "dsp ram");
+    msr_mem_map(MSR_TLS_BASE, 0x4000, MSR_PERM_RW, MSR_STATE_PRIVATE, "tls (32 threads)");
 
     Cpu* c = &g_cpu;
     memset(c, 0, sizeof *c);
@@ -140,10 +146,14 @@ int main(int argc, char** argv) {
     c->tls = MSR_TLS_BASE;
     const u32 stop = 0xFFFFFFF0u;
     c->r[14] = stop;
-    msr_receipt("running from entry %08X", MSR_CODE_BASE);
+    int prio = ex[0x20F] ? ex[0x20F] : 0x30;   // ARM11 local caps: main thread priority
+    sched_init_main(c, prio);
+    c = sched_main_cpu();
+    msr_receipt("running from entry %08X (main thread priority %X)", MSR_CODE_BASE, prio);
     msr_run(c, MSR_CODE_BASE, stop);
     msr_receipt("the entry function returned");
     msr_dump_state(c);
+    sched_summary();
     msr_log_close();
     return 0;
 }

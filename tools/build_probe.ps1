@@ -34,7 +34,7 @@ $flags = @("-O2", "-w", "-fno-strict-aliasing", "-ffp-contract=off", "-DMSR_TRAC
 $sources = @(Get-ChildItem "$gen\unit_*.c" | Sort-Object Name | ForEach-Object { $_.FullName })
 $sources += (Resolve-Path "$gen\table.c").Path
 $sources += @("runtime\cpu\dispatch.c", "runtime\os\log.c", "runtime\os\mem.c", "runtime\os\svc.c",
-              "runtime\os\kernel.c", "runtime\os\hle_apt.c", "runtime\os\hle_hid_gsp.c",
+              "runtime\os\kernel.c", "runtime\os\hle_apt.c", "runtime\os\hle_hid_gsp.c", "runtime\os\hle_fs_cfg.c", "runtime\os\sched.c", "runtime\os\hle_dsp.c",
               "runtime\probe\main_probe.c") | ForEach-Object { (Resolve-Path $_).Path }
 
 $headerTime = (Get-ChildItem "runtime\cpu\*.h" | Sort-Object LastWriteTime | Select-Object -Last 1).LastWriteTime
@@ -73,6 +73,6 @@ foreach ($p in $running) {
 }
 
 Write-Host "[3/3] Linking..."
-& $Gcc -o "$out\msr_probe.exe" $objects
+& $Gcc -o "$out\msr_probe.exe" $objects -lm -pthread
 if ($LASTEXITCODE -ne 0) { throw "link failed" }
 Write-Host "Built $out\msr_probe.exe"

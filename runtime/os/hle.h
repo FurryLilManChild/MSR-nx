@@ -47,4 +47,7 @@ int svc_srv(Ipc* q);
 int svc_apt(Ipc* q);
 int svc_hid(Ipc* q);
 int svc_gsp(Ipc* q);
+int svc_fs(Ipc* q);
+int svc_cfg(Ipc* q);
+int svc_dsp(Ipc* q);
 void hle_init(void);

@@ -12,3 +12,10 @@
 - Looking only 4 instructions back for a jump table's bounds check; compilers slot other work in
   between. Also `lo` tables have n entries, `ls` tables n + 1.
 - Stopping work when a tool is blocked instead of continuing with everything that does not need it.
+- Calling a likely cause a root cause before checking it in the code (probe 6: "the worker threads
+  set the lock up" was wrong; the real cause was a stand-in DSP reply). Trace the failing branch.
+- Stand-in IPC replies that answer "success" with zeroed outputs: a zero output can be a failure
+  flag the game checks much later (DSP LoadComponent's "loaded" byte).
+- Thumb `blx` to a compiler switch helper is a jump table, not a call: the bytes after it are data.
+- Capping instruction test samples per kind: the one untested operand shape (rotated ADR) broke 654
+  address calculations. Test every distinct shape.
