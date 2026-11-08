@@ -151,10 +151,13 @@ static Color sample(int unit, float s, float t) {
 
 // ---- texture combiners ----------------------------------------------------------------------------
 
+static Color g_frag_prim, g_frag_sec;
+
 static Color tev_source(u32 s, const Color* prim, const Color* tex, const Color* prev, const Color* buf, Color cst) {
     switch (s) {
     case 0: return *prim;
-    case 1: case 2: return (Color){0, 0, 0, 0};   // fragment lighting comes later
+    case 1: return g_frag_prim;
+    case 2: return g_frag_sec;
     case 3: return tex[0];
     case 4: return tex[1];
     case 5: return tex[2];
@@ -426,6 +429,9 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
     if (y1 > sy1) y1 = sy1;
     float inv = 1.0f / area;
     u32 tex_on = r[0x80] & 7;
+    int pica_lighting_on(void);
+    void pica_lighting(const float* q, const float* view, const float (*tex)[4], float* prim, float* sec);
+    int light_on = pica_lighting_on();
     int uv2_from_uv1 = (r[0x80] >> 13) & 1;
     for (int y = y0; y <= y1; y++) {
         for (int x = x0; x <= x1; x++) {
@@ -447,6 +453,14 @@ static void raster_tri(Target* T, const Screen* a, const Screen* b, const Screen
             }
             if (tex_on & 2) tex[1] = sample(1, I(uv1[0]), I(uv1[1]));
             if (tex_on & 4) tex[2] = uv2_from_uv1 ? sample(2, I(uv1[0]), I(uv1[1])) : sample(2, I(uv2[0]), I(uv2[1]));
+            if (light_on) {
+                float qv[4] = {I(quat.x), I(quat.y), I(quat.z), I(quat.w)}, vv[3] = {I(view[0]), I(view[1]), I(view[2])};
+                float tx[4][4], fp[4], fs[4];
+                for (int k = 0; k < 4; k++) { tx[k][0] = tex[k].r; tx[k][1] = tex[k].g; tx[k][2] = tex[k].b; tx[k][3] = tex[k].a; }
+                pica_lighting(qv, vv, (const float(*)[4])tx, fp, fs);
+                g_frag_prim = (Color){fp[0], fp[1], fp[2], fp[3]};
+                g_frag_sec = (Color){fs[0], fs[1], fs[2], fs[3]};
+            } else g_frag_prim = g_frag_sec = (Color){0, 0, 0, 0};
             #undef I
             Color out = run_tev(prim, tex);
             fragment(T, x, y, z, out);

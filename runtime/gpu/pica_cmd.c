@@ -235,6 +235,7 @@ static void write_reg(u32 id, u32 value, u32 mask) {
         }
         return;
     }
+    if (id >= 0x1C8 && id <= 0x1CF) { void pica_light_lut_write(u32 v); pica_light_lut_write(value); return; }
     switch (id) {
     case 0x22E: draw(0); return;   // DRAWARRAYS
     case 0x22F: draw(1); return;   // DRAWELEMENTS

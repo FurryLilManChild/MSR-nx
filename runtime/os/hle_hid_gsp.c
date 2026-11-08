@@ -1,6 +1,8 @@
 // MSR-nx: hid and gsp::Gpu services, first version: the requests that hand out handles and shared
 // memory. Input and the GPU behind them come later. Layouts follow fearkov/zakuro (MIT) hid.rs and
 // gsp.rs and 3dbrew.
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "hle.h"
 #include "msr_log.h"
@@ -11,7 +13,79 @@ static u32 g_hid_mem, g_hid_events[5];
 static u32 g_gsp_mem, g_gsp_event;
 static int g_gsp_registered;
 
+// ---- hid: the pad and touch screen sections of the shared memory, written every frame --------
+// Layout (3dbrew "HID Shared Memory", fearkov/zakuro hid.rs): each section starts with the tick its
+// ring last started over at, the one before, and the index of the newest entry; the pad section
+// keeps the held buttons at 0x1C and eight 0x10-byte entries from 0x28 (held, pressed, released,
+// circle pad x, y); the touch section at 0xA8 keeps eight 8-byte entries from 0xC8.
+u32 msr_buttons;                 // set by the platform layer (Switch input, probe script)
+s16 msr_circle_x, msr_circle_y;
+int msr_touch_down;
+u16 msr_touch_x, msr_touch_y;
+
+static void hid_section_header(u32 sec, u32 index, u64* ticks) {
+    u64 now = sched_now_ns() / 1000 * 268111856ull / 1000000;
+    if (index == 0) { ticks[1] = ticks[0]; ticks[0] = now; }
+    wr32(sec, (u32)ticks[0]); wr32(sec + 4, (u32)(ticks[0] >> 32));
+    wr32(sec + 8, (u32)ticks[1]); wr32(sec + 12, (u32)(ticks[1] >> 32));
+    wr32(sec + 0x10, index);
+}
+
+static void hid_update(void) {
+    static u32 prev, pad_i, touch_i;
+    static u64 pad_ticks[2], touch_ticks[2];
+    KObject* o = g_hid_mem ? k_get(g_hid_mem) : 0;
+    if (!o || !o->addr) return;
+    u32 base = o->addr;
+    u32 b = msr_buttons & 0xFFF;
+    if (msr_circle_x > 75) b |= 1u << 28;
+    if (msr_circle_x < -75) b |= 1u << 29;
+    if (msr_circle_y > 75) b |= 1u << 30;
+    if (msr_circle_y < -75) b |= 1u << 31;
+    u32 pressed = b & ~prev, released = prev & ~b;
+    prev = b;
+    pad_i = (pad_i + 1) % 8;
+    hid_section_header(base, pad_i, pad_ticks);
+    wr32(base + 0x1C, b);
+    u32 e = base + 0x28 + 0x10 * pad_i;
+    wr32(e, b); wr32(e + 4, pressed); wr32(e + 8, released);
+    wr16(e + 12, (u16)msr_circle_x); wr16(e + 14, (u16)msr_circle_y);
+    touch_i = (touch_i + 1) % 8;
+    hid_section_header(base + 0xA8, touch_i, touch_ticks);
+    u32 t = base + 0xA8 + 0x20 + 8 * touch_i;
+    wr16(t, msr_touch_down ? msr_touch_x : 0); wr16(t + 2, msr_touch_down ? msr_touch_y : 0);
+    wr32(t + 4, msr_touch_down ? 1 : 0);
+    sched_wake(g_hid_events[0]);
+    sched_wake(g_hid_events[1]);
+}
+
+// Probe input script, MSR_INPUT="START@6.0-6.3,A@9-9.2": buttons held over game-time ranges.
+static void probe_script(void) {
+    static const char* names[12] = {"A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y"};
+    const char* e = getenv("MSR_INPUT");
+    if (!e) return;
+    double now = sched_now_ns() / 1e9;
+    u32 b = 0;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", e);
+    for (char* tok = strtok(buf, ","); tok; tok = strtok(0, ",")) {
+        char name[16]; double t0, t1;
+        if (sscanf(tok, "%15[A-Z]@%lf-%lf", name, &t0, &t1) != 3) continue;
+        for (int k = 0; k < 12; k++)
+            if (!strcmp(name, names[k]) && now >= t0 && now < t1) b |= 1u << k;
+    }
+    if (b != (msr_buttons & 0xFFF)) msr_log("input: buttons %03X at %.2f s", b, now);
+    msr_buttons = b;
+}
+
+static void hid_frame(void) {
+    probe_script();
+    hid_update();
+}
+
 int svc_hid(Ipc* q) {
+    static int timer;
+    if (!timer) { timer = 1; sched_add_timer(16715000, hid_frame); }
     switch (q->cmd) {
     case 0x000A: {  // GetIPCHandles -> shared memory, 5 events (pad 0, pad 1, accel, gyro, debug)
         if (!g_hid_mem) {
