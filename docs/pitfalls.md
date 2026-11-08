@@ -23,3 +23,10 @@
   moves with the circle pad; the d-pad is for Aeion abilities).
 - Calling a theory the cause in a status message before testing it (the "waits for a sound" theory
   was wrong; say "theory" and test it next).
+- Shipping a Switch build with no speed meter or input log: test 1 could not say why A did nothing.
+  Every test build reports pictures per second, time per platform job and the first button presses.
+- Interpreting the game's PICA vertex shaders inside one GPU shader: uam gave it 255 registers and
+  43 KB of spill per warp (deko3d's default queue scratch is 2 KB). Check the .dksh header (num_gprs,
+  per_warp_scratch_sz) of every generated shader; translate per configuration instead.
+- deko3d's OriginLowerLeft makes the swapchain flip the whole window vertically; 2D-engine blits are
+  not flipped, so a picture blitted to the swapchain shows upside down.

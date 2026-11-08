@@ -10,6 +10,7 @@
 #include <string.h>
 #include "msr_log.h"
 #include "pica.h"
+#include <stdio.h>
 #include <time.h>
 
 Pica g_pica;
@@ -174,6 +175,87 @@ static void vtime_draw(int indexed) {
     g_vtime_verts += hi - lo + 1;
 }
 
+// ---- vertex shader keys --------------------------------------------------------------------------
+// A vertex shader configuration is the game's PICA program (only the instructions reachable from the
+// entry point, with the swizzle patterns they use) plus the output setup. Its 64-bit key names the
+// translated Switch shader in the shader pack. New configurations can be written to a file
+// (pica_vs_dump_path) for the translator, tools/shaders/pica2glsl.py.
+static u64 fnv(u64 h, u32 v) { for (int i = 0; i < 4; i++) { h ^= (v >> (8 * i)) & 0xFF; h *= 0x100000001B3ull; } return h; }
+
+static u64 program_hash(const ShaderUnit* u, u32 entry) {
+    static u8 seen[4096];
+    static u16 work[4096];
+    memset(seen, 0, sizeof seen);
+    int n = 0;
+    work[n++] = (u16)entry;
+    u64 h = 0xCBF29CE484222325ull;
+    while (n) {
+        u32 pc = work[--n];
+        while (pc < 4096 && !seen[pc]) {
+            seen[pc] = 1;
+            u32 w = u->program[pc], op = w >> 26;
+            u32 D = (w >> 10) & 0xFFF, N = w & 0xFF;
+            if (op == 0x22) break;   // END
+            if ((op >= 0x24 && op <= 0x29) || op == 0x2C || op == 0x2D) {
+                if (n < 4090) work[n++] = (u16)D;
+                if ((op >= 0x24 && op <= 0x28) && n < 4090 && D + N < 4096) work[n++] = (u16)(D + N);
+                if (op == 0x29 && n < 4090 && D + 1 < 4096) work[n++] = (u16)(D + 1);
+            }
+            pc++;
+        }
+    }
+    for (u32 pc = 0; pc < 4096; pc++) {
+        if (!seen[pc]) continue;
+        u32 w = u->program[pc], op = w >> 26;
+        h = fnv(h, pc);
+        h = fnv(h, w);
+        if (op >= 0x30) h = fnv(h, u->swizzle[w & 0x1F]);
+        else if (op < 0x20 || op == 0x2E || op == 0x2F) h = fnv(h, u->swizzle[w & 0x7F]);
+    }
+    return h;
+}
+
+const char* pica_vs_dump_path;
+void (*pica_vs_check_hook)(void);   // the probe's translation check
+static unsigned g_key_version = ~0u;
+static u32 g_key_entry;
+static u64 g_key_prog;
+
+void pica_vs_dump(u64 h, const char* path) {
+    const u32* r = g_pica.reg;
+    FILE* f = fopen(path, "ab");
+    if (!f) return;
+    u32 hdr[13] = {0x31535650u /* "PVS1" */, (u32)h, (u32)(h >> 32), r[0x2BA] & 0xFFFF, r[0x2BD], r[0x4F] & 7};
+    for (int k = 0; k < 7; k++) hdr[6 + k] = r[0x50 + k];
+    fwrite(hdr, 4, 13, f);
+    fwrite(g_pica.vs.program, 4, 4096, f);
+    fwrite(g_pica.vs.swizzle, 4, 128, f);
+    fclose(f);
+}
+
+u64 pica_vs_key(void) {
+    const u32* r = g_pica.reg;
+    u32 entry = r[0x2BA] & 0xFFFF;
+    if (g_key_version != pica_program_version || g_key_entry != entry) {
+        g_key_prog = program_hash(&g_pica.vs, entry);
+        g_key_version = pica_program_version;
+        g_key_entry = entry;
+    }
+    u64 h = fnv(g_key_prog, entry);
+    h = fnv(h, r[0x2BD]);
+    h = fnv(h, r[0x4F] & 7);
+    for (int k = 0; k < 7; k++) h = fnv(h, r[0x50 + k]);
+    if (pica_vs_dump_path) {
+        #define SEEN_MAX 4096
+        static u64 seen_keys[SEEN_MAX];
+        static unsigned nseen;
+        for (unsigned k = 0; k < nseen; k++) if (seen_keys[k] == h) return h;
+        if (nseen < SEEN_MAX) seen_keys[nseen++] = h;
+        pica_vs_dump(h, pica_vs_dump_path);
+    }
+    return h;
+}
+
 // Render-target statistics for planning the GPU renderer's speed work: which surfaces are drawn to,
 // and how often a draw samples a texture that an earlier draw rendered (render to texture).
 #define RT_MAX 64
@@ -218,6 +300,8 @@ static void draw(int indexed) {
     if (n > MAX_DRAW) n = MAX_DRAW;
     g_pica.draws++;
     rt_stats();
+    if (pica_vs_dump_path) pica_vs_key();
+    if (pica_vs_check_hook) pica_vs_check_hook();
     if (pica_vtime < 0) pica_vtime = getenv("MSR_VTIME") ? 1 : 0;
     if (pica_vtime) vtime_draw(indexed);
     if (pica_draw_hook && pica_draw_hook(indexed)) { g_pica.vertices += n; if (indexed) g_pica.draws_indexed++; return; }
@@ -354,6 +438,8 @@ void pica_summary(void) {
                 g_pica.gs_draws, g_pica.vertices, g_pica.immediate_vertices, msr_sw_triangles);
     pica_rt_summary();
     msr_perf_report(0);
+    { extern void (*pica_vs_check_hook)(void); void vs_check_summary(void) __attribute__((weak));
+      if (pica_vs_check_hook && vs_check_summary) vs_check_summary(); }
 }
 
 void pica_run_list(u32 vaddr, u32 size) {

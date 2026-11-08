@@ -129,6 +129,9 @@ static void display_init(void) {
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, g_dev);
     qm.flags = DkQueueFlags_Graphics;
+    // scratch memory for the interpreter vertex shader's spills (43520 bytes per warp); the translated
+    // shaders need none, but a configuration missing from the shader pack falls back to it
+    qm.perWarpScratchMemorySize = 0xAA00;
     g_queue = dkQueueCreate(&qm);
 }
 
@@ -299,7 +302,7 @@ int main(int argc, char** argv) {
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log
     msr_log_open(DIR);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 2 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 3 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -311,7 +314,12 @@ int main(int argc, char** argv) {
     hidInitializeTouchScreen();
     mutexInit(&g_qlock);
     display_init();
-    if (!cpu_render) { dkr_init(g_dev, g_queue, &g_qlock); g_gpu_render = 1; }
+    if (!cpu_render) {
+        dkr_init(g_dev, g_queue, &g_qlock);
+        void dkr_load_pack(const char* pack_path, const char* new_path);
+        dkr_load_pack(DIR "/shaders.pack", DIR "/vs_new.bin");
+        g_gpu_render = 1;
+    }
     if (R_SUCCEEDED(audoutInitialize()) && R_SUCCEEDED(audoutStartAudioOut())) {
         pthread_t at;
         pthread_create(&at, 0, audio_thread, 0);
@@ -347,6 +355,12 @@ int main(int argc, char** argv) {
             msr_receipt("speed at %.0f s: %.1f top-screen pictures per second", (now - g_start_ns) / 1e9,
                         (sw - last_swaps) / secs);
             msr_perf_report(secs);
+            if (g_gpu_render) {
+                void dkr_vs_stats(unsigned* hits, unsigned* misses);
+                unsigned h, m;
+                dkr_vs_stats(&h, &m);
+                msr_receipt("  vertex shaders: %u draws translated, %u on the interpreter", h, m);
+            }
             last_swaps = sw;
             next_report = now + 5000000000ull;
         }

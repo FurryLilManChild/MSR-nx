@@ -111,10 +111,15 @@ int main(int argc, char** argv) {
         extern unsigned msr_frame_every;
         const char* e = getenv("MSR_SECONDS");
         if (e) msr_time_limit_ns = (u64)atoi(e) * 1000000000ull;
+        e = getenv("MSR_VS_DUMP");   // file to collect the game's vertex shader configurations in
+        if (e) { extern const char* pica_vs_dump_path; pica_vs_dump_path = e; }
         e = getenv("MSR_FRAME_EVERY");
         if (e) msr_frame_every = (unsigned)atoi(e);
     }
     { extern char msr_save_dir[512]; snprintf(msr_save_dir, sizeof msr_save_dir, "%s/save", argv[2]); }
+#ifdef MSR_VS_CHECK
+    { void vs_check_install(void); vs_check_install(); }
+#endif
     Cpu* c = msr_boot(argv[1]);
     if (!c) return 1;
     msr_run(c, MSR_CODE_BASE, 0xFFFFFFF0u);

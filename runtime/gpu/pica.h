@@ -62,6 +62,10 @@ extern void (*pica_fill_hook)(u32 start, u32 end, u32 value, u32 width);
 extern float pica_lut[24][256][2];
 extern unsigned pica_lut_version, pica_program_version;
 float pica_f24(u32 v);
+// The current vertex shader configuration's key (program, entry point, output setup).
+u64 pica_vs_key(void);
+extern const char* pica_vs_dump_path;
+void pica_vs_dump(u64 key, const char* path);   // appends the current configuration to a dump file   // when set, new configurations are appended to this file
 // Runs the vertex shader for one vertex: inputs v0..v15, writes the outputs o0..o15.
 void pica_shader_run(ShaderUnit* u, const u32* reg_block, const Vec4* in, Vec4* out);
 // Maps shader outputs to vertex attributes with GPUREG_SH_OUTMAP.

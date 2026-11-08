@@ -1,5 +1,29 @@
 # Progress log (newest first)
 
+## 2026-11-08 (afternoon and evening): Switch tests 1 to 3, speed
+
+- Switch test 1 (deko3d renderer): reached the title screen, picture upside down (reflected top to
+  bottom). Cause, from deko3d's source: OriginLowerLeft sets HAL_TRANSFORM_FLIP_V on the window; our
+  present path blits rows in memory order. Fix: screen pictures are stored bottom to top. Confirmed
+  fixed by test 2.
+- Probe profile (gprof, 14 s of game time): 85% of CPU time was display transfers (bloom chain and
+  screen output, about 240 per second) done with float colors. Integer, specialized loops: 6.5 s to
+  2.0 s, every saved frame byte-identical. RGBA8 surface readback and upload walk 8x8 tiles.
+- Switch test 2: speed meter in the receipt. 1.4 pictures per second; per 5 s, about 4.4 s waiting
+  for the GPU, 70 ms of transfers, 95 ms of vertex fetch. Button presses reach the game (A works when
+  held, the game was too slow to see short presses).
+- Cause of the GPU time, measured from the .dksh headers: the vertex interpreter shader used 255
+  registers and 43520 bytes of spill per warp. The fragment uber-shader: 73 registers, 2048 bytes.
+- Vertex shader translation (tools/shaders/pica2glsl.py): each configuration (program reachable from
+  the entry point, swizzles, output map) becomes its own GLSL shader with plain registers and
+  structured control flow; the same text compiles as C++ for the probe's check. 12 configurations
+  cover the title screen, intro and first gameplay; the check compared 7.2 million vertices against
+  the reference interpreter with no difference. Translated shaders: 20 to 47 registers, no spill.
+  Pack format: shaders.pack (built from game data, SD card only). Misses fall back to the interpreter
+  and are saved to vs_new.bin. Queue scratch raised to 0xAA00 per warp for that fallback.
+- Probe statistics: two 240x400 render targets, no draw samples a render target directly (the game
+  copies them with texture copies first), 4 display transfers and about 3 texture copies per frame.
+
 ## 2026-11-08 (early morning): first pictures, title screen, gameplay (cloud probe)
 
 - PICA200 command processor, vertex shader interpreter and a software reference renderer (probe

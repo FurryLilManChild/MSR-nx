@@ -41,6 +41,7 @@ static unsigned g_draws_since_flush;
 // ---- memory -------------------------------------------------------------------------------------
 
 static void flush(int wait);
+static const DkShader* vs_select(void);
 
 static u32 dyn_alloc(u32 size, u32 align) {
     u32 p = (g_dyn_pos + align - 1) & ~(align - 1);
@@ -672,7 +673,7 @@ static int dk_draw(int indexed) {
         sc = (DkScissor){x0, y0, x1 >= x0 ? x1 - x0 + 1 : 0, y1 >= y0 ? y1 - y0 + 1 : 0};
     }
     dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
-    DkShader const* sh[2] = {&g_vsh, &g_fsh};
+    DkShader const* sh[2] = {vs_select(), &g_fsh};
     dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
     u32 mode = (r[0x25E] >> 8) & 3;
     DkPrimitive prim = mode == 1 ? DkPrimitive_TriangleStrip : mode == 2 ? DkPrimitive_TriangleFan : DkPrimitive_Triangles;
@@ -723,6 +724,91 @@ static void dk_fill(u32 start, u32 end, u32 value, u32 width) {
 void dkr_frame_end(void) { g_frame++; }
 
 // ---- setup ------------------------------------------------------------------------------------------------
+
+// ---- the shader pack ----------------------------------------------------------------------------
+// shaders.pack holds the game's vertex shaders translated to Switch shaders ahead of time
+// (tools/shaders/pica2glsl.py and mkpack.py). Layout: "MSRVSPK1", u32 count, u32 0, then count
+// entries {u64 key, u32 offset, u32 size} sorted by key, then the .dksh files at those offsets.
+// A configuration missing from the pack runs on the interpreter (pica_vsh.glsl) and is appended
+// to vs_new.bin so the next pack can include it.
+typedef struct { u64 key; u32 offset, size; } PackEntry;
+static PackEntry* g_pack;
+static DkShader* g_pack_sh;
+static u8* g_pack_ready;
+static u32 g_pack_n;
+static DkMemBlock g_pack_code;
+static char g_new_path[256];
+static unsigned g_vs_hits, g_vs_misses;
+
+void dkr_load_pack(const char* pack_path, const char* new_path) {
+    snprintf(g_new_path, sizeof g_new_path, "%s", new_path);
+    FILE* f = fopen(pack_path, "rb");
+    if (!f) { msr_receipt("gpu: no shader pack at %s; every vertex shader runs on the interpreter", pack_path); return; }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    u32 hdr[4];
+    if (size < 16 || fread(hdr, 4, 4, f) != 4 || hdr[0] != 0x5652534Du || hdr[1] != 0x314B5053u) {
+        msr_receipt("gpu: %s is not a shader pack", pack_path);
+        fclose(f);
+        return;
+    }
+    u32 n = hdr[2];
+    g_pack = (PackEntry*)malloc(n * sizeof *g_pack);
+    if (fread(g_pack, sizeof *g_pack, n, f) != n) { msr_receipt("gpu: shader pack is cut short"); free(g_pack); g_pack = 0; fclose(f); return; }
+    u32 code_size = (u32)((size + DK_SHADER_CODE_UNUSABLE_SIZE + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1));
+    DkMemBlockMaker mm;
+    dkMemBlockMakerDefaults(&mm, g_dev, code_size);
+    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+    g_pack_code = dkMemBlockCreate(&mm);
+    u8* cpu = (u8*)dkMemBlockGetCpuAddr(g_pack_code);
+    fseek(f, 0, SEEK_SET);
+    size_t got = fread(cpu, 1, (size_t)size, f);
+    fclose(f);
+    if (got != (size_t)size) { msr_receipt("gpu: shader pack read failed"); free(g_pack); g_pack = 0; return; }
+    g_pack_sh = (DkShader*)calloc(n, sizeof *g_pack_sh);
+    g_pack_ready = (u8*)calloc(n, 1);
+    g_pack_n = n;
+    msr_receipt("gpu: shader pack with %u translated vertex shaders (%ld bytes)", n, size);
+}
+
+static const DkShader* vs_select(void) {
+    static u64 last_key;
+    static const DkShader* last = 0;
+    u64 key = pica_vs_key();
+    if (last && key == last_key) { g_vs_hits++; return last; }
+    last_key = key;
+    u32 lo = 0, hi = g_pack_n;
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (g_pack[mid].key < key) lo = mid + 1; else hi = mid;
+    }
+    if (lo < g_pack_n && g_pack[lo].key == key) {
+        if (!g_pack_ready[lo]) {
+            DkShaderMaker sm;
+            dkShaderMakerDefaults(&sm, g_pack_code, g_pack[lo].offset);
+            dkShaderInitialize(&g_pack_sh[lo], &sm);
+            g_pack_ready[lo] = 1;
+        }
+        g_vs_hits++;
+        return last = &g_pack_sh[lo];
+    }
+    // not translated yet: the interpreter, and a note for the next pack (once per configuration)
+    g_vs_misses++;
+    static u64 told[256];
+    static unsigned ntold;
+    int seen = 0;
+    for (unsigned k = 0; k < ntold; k++) if (told[k] == key) seen = 1;
+    if (!seen && ntold < 256) {
+        told[ntold++] = key;
+        msr_receipt("gpu: vertex shader %016llX is not in the pack; it runs on the interpreter (saved to vs_new.bin)",
+                    (unsigned long long)key);
+        pica_vs_dump(key, g_new_path);
+    }
+    return last = &g_vsh;
+}
+
+void dkr_vs_stats(unsigned* hits, unsigned* misses) { *hits = g_vs_hits; *misses = g_vs_misses; g_vs_hits = g_vs_misses = 0; }
 
 static void shader_load(DkShader* sh, const u8* code, u32 size, u32* code_off) {
     u8* cpu = (u8*)dkMemBlockGetCpuAddr(g_code);
