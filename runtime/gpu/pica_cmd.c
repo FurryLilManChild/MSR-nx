@@ -133,11 +133,8 @@ int pica_vertex_layout(u32 lo, u32 count, PicaAttrSrc* in, PicaLoaderCopy* copie
         if (!n) continue;
         u32 src = pica_vaddr(base + off + lo * stride);
         if (!src) continue;
-        u32 bytes = count * stride;
-        if (bytes < 64) bytes = 64;   // a stride of 0 still reads one vertex's worth
         PicaLoaderCopy* cp = &copies[(*ncopies)++];
         cp->src = src;
-        cp->bytes = bytes;
         cp->dst = pos_out;
         u32 pos = 0;
         for (u32 k = 0; k < n; k++) {
@@ -155,6 +152,9 @@ int pica_vertex_layout(u32 lo, u32 count, PicaAttrSrc* in, PicaLoaderCopy* copie
             }
             pos += comps * sz;
         }
+        // exactly the bytes the vertices use: never past the end of the game's buffer
+        u32 bytes = (count - 1) * stride + pos;
+        cp->bytes = bytes;
         pos_out = (pos_out + bytes + 3) & ~3u;
     }
     for (u32 k = 0; k < 16; k++) { memset(&in[k], 0, sizeof in[k]); in[k].fixed = (Vec4){0, 0, 0, 1}; }

@@ -129,7 +129,7 @@ static void display_init(void) {
 
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, g_dev);
-    qm.flags = DkQueueFlags_Graphics;
+    qm.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute;   // the VRAM kernels and the screen conversion are compute work
     // scratch memory for the interpreter vertex shader's spills (43520 bytes per warp); the translated
     // shaders need none, but a configuration missing from the shader pack falls back to it
     qm.perWarpScratchMemorySize = 0xAA00;

@@ -1154,12 +1154,13 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     shader_load(&g_fsh, pica_fsh_dksh, pica_fsh_dksh_size, &co);
     for (int k = 0; k < K_COUNT; k++) shader_load(&g_k[k], kcode[k], ksize[k], &co);
 
-    // the GPU's copy of VRAM, starting from what guest memory holds
+    // the GPU's copy of VRAM, empty like the guest's at boot. (dkr_init runs before the guest
+    // address space is mapped: guest memory must not be touched here.)
     dkMemBlockMakerDefaults(&mm, dev, VRAM_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     g_vram = dkMemBlockCreate(&mm);
     g_vram_gpu = dkMemBlockGetGpuAddr(g_vram);
-    memcpy(dkMemBlockGetCpuAddr(g_vram), g_mem + VRAM_BASE, VRAM_SIZE);
+    memset(dkMemBlockGetCpuAddr(g_vram), 0, VRAM_SIZE);
 
     dkMemBlockMakerDefaults(&mm, dev, DYN_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
