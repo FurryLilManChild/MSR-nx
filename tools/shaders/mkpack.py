@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MSR-nx: packs translated vertex shaders (.dksh files named vs_<key>.dksh) into shaders.pack.
+"""MSR-nx: packs translated shaders (.dksh files named vs_<key>.dksh and fs_<key>.dksh) into shaders.pack.
 
 Layout (read by runtime/gpu/dk/dk_pica.c, dkr_load_pack): "MSRVSPK1", u32 count, u32 0, then
 count entries {u64 key, u32 offset, u32 size} sorted by key, then each .dksh at its offset,
@@ -13,9 +13,9 @@ import sys
 
 def main():
     if len(sys.argv) != 3:
-        raise SystemExit('usage: mkpack.py <dir with vs_*.dksh> <shaders.pack>')
+        raise SystemExit('usage: mkpack.py <dir with vs_*.dksh and fs_*.dksh> <shaders.pack>')
     items = []
-    for p in glob.glob(os.path.join(sys.argv[1], 'vs_*.dksh')):
+    for p in glob.glob(os.path.join(sys.argv[1], 'vs_*.dksh')) + glob.glob(os.path.join(sys.argv[1], 'fs_*.dksh')):
         key = int(os.path.basename(p)[3:19], 16)
         items.append((key, open(p, 'rb').read()))
     items.sort()

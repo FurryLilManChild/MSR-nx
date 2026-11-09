@@ -42,6 +42,7 @@ static unsigned g_draws_since_flush;
 
 static void flush(int wait);
 static const DkShader* vs_select(void);
+static const DkShader* fs_select(void);
 
 static u32 dyn_alloc(u32 size, u32 align) {
     u32 p = (g_dyn_pos + align - 1) & ~(align - 1);
@@ -673,7 +674,7 @@ static int dk_draw(int indexed) {
         sc = (DkScissor){x0, y0, x1 >= x0 ? x1 - x0 + 1 : 0, y1 >= y0 ? y1 - y0 + 1 : 0};
     }
     dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
-    DkShader const* sh[2] = {vs_select(), &g_fsh};
+    DkShader const* sh[2] = {vs_select(), fs_select()};
     dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
     u32 mode = (r[0x25E] >> 8) & 3;
     DkPrimitive prim = mode == 1 ? DkPrimitive_TriangleStrip : mode == 2 ? DkPrimitive_TriangleFan : DkPrimitive_Triangles;
@@ -737,11 +738,16 @@ static DkShader* g_pack_sh;
 static u8* g_pack_ready;
 static u32 g_pack_n;
 static DkMemBlock g_pack_code;
-static char g_new_path[256];
+static char g_new_path[256], g_fs_new_path[256];
 static unsigned g_vs_hits, g_vs_misses;
+static int g_force_vs_interp, g_force_fs_general;
+// Comparison switches for tests: run every draw on the interpreter vertex shader and/or the general
+// fragment shader, as test builds 1 and 2 did.
+void dkr_force_general(int vs, int fs) { g_force_vs_interp = vs; g_force_fs_general = fs; }
 
-void dkr_load_pack(const char* pack_path, const char* new_path) {
+void dkr_load_pack(const char* pack_path, const char* new_path, const char* fs_new_path) {
     snprintf(g_new_path, sizeof g_new_path, "%s", new_path);
+    snprintf(g_fs_new_path, sizeof g_fs_new_path, "%s", fs_new_path);
     FILE* f = fopen(pack_path, "rb");
     if (!f) { msr_receipt("gpu: no shader pack at %s; every vertex shader runs on the interpreter", pack_path); return; }
     fseek(f, 0, SEEK_END);
@@ -769,44 +775,73 @@ void dkr_load_pack(const char* pack_path, const char* new_path) {
     g_pack_sh = (DkShader*)calloc(n, sizeof *g_pack_sh);
     g_pack_ready = (u8*)calloc(n, 1);
     g_pack_n = n;
-    msr_receipt("gpu: shader pack with %u translated vertex shaders (%ld bytes)", n, size);
+    msr_receipt("gpu: shader pack with %u shaders (%ld bytes)", n, size);
+}
+
+// Finds a key in the pack and prepares its shader the first time; null when it is not there.
+static const DkShader* pack_find(u64 key) {
+    u32 lo = 0, hi = g_pack_n;
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (g_pack[mid].key < key) lo = mid + 1; else hi = mid;
+    }
+    if (lo >= g_pack_n || g_pack[lo].key != key) return 0;
+    if (!g_pack_ready[lo]) {
+        DkShaderMaker sm;
+        dkShaderMakerDefaults(&sm, g_pack_code, g_pack[lo].offset);
+        dkShaderInitialize(&g_pack_sh[lo], &sm);
+        g_pack_ready[lo] = 1;
+    }
+    return &g_pack_sh[lo];
+}
+
+// A configuration missing from the pack: a receipt line and a dump for the next pack, once each.
+static int first_miss(u64 key) {
+    static u64 told[512];
+    static unsigned ntold;
+    for (unsigned k = 0; k < ntold; k++) if (told[k] == key) return 0;
+    if (ntold < 512) told[ntold++] = key;
+    return 1;
 }
 
 static const DkShader* vs_select(void) {
     static u64 last_key;
     static const DkShader* last = 0;
     u64 key = pica_vs_key();
-    if (last && key == last_key) { g_vs_hits++; return last; }
+    if (last && key == last_key) { if (last == &g_vsh) g_vs_misses++; else g_vs_hits++; return last; }
     last_key = key;
-    u32 lo = 0, hi = g_pack_n;
-    while (lo < hi) {
-        u32 mid = (lo + hi) / 2;
-        if (g_pack[mid].key < key) lo = mid + 1; else hi = mid;
-    }
-    if (lo < g_pack_n && g_pack[lo].key == key) {
-        if (!g_pack_ready[lo]) {
-            DkShaderMaker sm;
-            dkShaderMakerDefaults(&sm, g_pack_code, g_pack[lo].offset);
-            dkShaderInitialize(&g_pack_sh[lo], &sm);
-            g_pack_ready[lo] = 1;
-        }
-        g_vs_hits++;
-        return last = &g_pack_sh[lo];
-    }
-    // not translated yet: the interpreter, and a note for the next pack (once per configuration)
+    const DkShader* sh = g_force_vs_interp ? 0 : pack_find(key);
+    if (sh) { g_vs_hits++; return last = sh; }
+    if (g_force_vs_interp) { g_vs_misses++; return last = &g_vsh; }
     g_vs_misses++;
-    static u64 told[256];
-    static unsigned ntold;
-    int seen = 0;
-    for (unsigned k = 0; k < ntold; k++) if (told[k] == key) seen = 1;
-    if (!seen && ntold < 256) {
-        told[ntold++] = key;
+    if (first_miss(key)) {
         msr_receipt("gpu: vertex shader %016llX is not in the pack; it runs on the interpreter (saved to vs_new.bin)",
                     (unsigned long long)key);
         pica_vs_dump(key, g_new_path);
     }
     return last = &g_vsh;
 }
+
+static unsigned g_fs_hits, g_fs_misses;
+static const DkShader* fs_select(void) {
+    static u64 last_key;
+    static const DkShader* last = 0;
+    u64 key = pica_fs_key();
+    if (last && key == last_key) { if (last == &g_fsh) g_fs_misses++; else g_fs_hits++; return last; }
+    last_key = key;
+    const DkShader* sh = g_force_fs_general ? 0 : pack_find(key);
+    if (sh) { g_fs_hits++; return last = sh; }
+    if (g_force_fs_general) { g_fs_misses++; return last = &g_fsh; }
+    g_fs_misses++;
+    if (first_miss(key)) {
+        msr_receipt("gpu: fragment shader %016llX is not in the pack; it runs on the general one (saved to fs_new.bin)",
+                    (unsigned long long)key);
+        pica_fs_dump(key, g_fs_new_path);
+    }
+    return last = &g_fsh;
+}
+
+void dkr_fs_stats(unsigned* hits, unsigned* misses) { *hits = g_fs_hits; *misses = g_fs_misses; g_fs_hits = g_fs_misses = 0; }
 
 void dkr_vs_stats(unsigned* hits, unsigned* misses) { *hits = g_vs_hits; *misses = g_vs_misses; g_vs_hits = g_vs_misses = 0; }
 

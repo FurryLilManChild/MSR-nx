@@ -302,7 +302,7 @@ int main(int argc, char** argv) {
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log
     msr_log_open(DIR);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 3 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 4 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -316,8 +316,15 @@ int main(int argc, char** argv) {
     display_init();
     if (!cpu_render) {
         dkr_init(g_dev, g_queue, &g_qlock);
-        void dkr_load_pack(const char* pack_path, const char* new_path);
-        dkr_load_pack(DIR "/shaders.pack", DIR "/vs_new.bin");
+        void dkr_load_pack(const char* pack_path, const char* new_path, const char* fs_new_path);
+        dkr_load_pack(DIR "/shaders.pack", DIR "/vs_new.bin", DIR "/fs_new.bin");
+        // empty files that switch the pack off, for comparing pictures: vsinterp, fsgeneral
+        void dkr_force_general(int vs, int fs);
+        FILE* t1 = fopen(DIR "/vsinterp", "rb");
+        FILE* t2 = fopen(DIR "/fsgeneral", "rb");
+        dkr_force_general(t1 != 0, t2 != 0);
+        if (t1) { fclose(t1); msr_receipt("gpu: vsinterp file found: every vertex shader runs on the interpreter"); }
+        if (t2) { fclose(t2); msr_receipt("gpu: fsgeneral file found: every draw uses the general fragment shader"); }
         g_gpu_render = 1;
     }
     if (R_SUCCEEDED(audoutInitialize()) && R_SUCCEEDED(audoutStartAudioOut())) {
@@ -360,6 +367,9 @@ int main(int argc, char** argv) {
                 unsigned h, m;
                 dkr_vs_stats(&h, &m);
                 msr_receipt("  vertex shaders: %u draws translated, %u on the interpreter", h, m);
+                void dkr_fs_stats(unsigned* hits, unsigned* misses);
+                dkr_fs_stats(&h, &m);
+                msr_receipt("  fragment shaders: %u draws specialized, %u on the general one", h, m);
             }
             last_swaps = sw;
             next_report = now + 5000000000ull;

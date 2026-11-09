@@ -14,7 +14,7 @@ done
 echo RUNTIME-OK
 if [ "$1" = "link" ]; then
   aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test3" nxout/msr.nacp
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test4" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi

@@ -256,6 +256,62 @@ u64 pica_vs_key(void) {
     return h;
 }
 
+// ---- fragment shader keys ------------------------------------------------------------------------
+// The registers that decide what the fragment shader does (texture units on, combiner sources,
+// operands and modes, lighting setup, alpha test function, w-buffer), with only the bits the shader
+// reads. Colors, light values and lookup tables stay uniforms. Must match the reg() reads in
+// runtime/gpu/dk/pica_fsh.glsl.
+static const u32 k_fs_regs[][2] = {
+    {0x80, 0x2007}, {0x83, 0x70000000}, {0x8F, 1}, {0xE0, 0xFF00}, {0x104, 0x71}, {0x1C6, 1},
+    {0xC0, 0x0FFF0FFF}, {0xC1, 0x00FFFFFF}, {0xC2, 0x000F000F}, {0xC4, 0x00030003},
+    {0xC8, 0x0FFF0FFF}, {0xC9, 0x00FFFFFF}, {0xCA, 0x000F000F}, {0xCC, 0x00030003},
+    {0xD0, 0x0FFF0FFF}, {0xD1, 0x00FFFFFF}, {0xD2, 0x000F000F}, {0xD4, 0x00030003},
+    {0xD8, 0x0FFF0FFF}, {0xD9, 0x00FFFFFF}, {0xDA, 0x000F000F}, {0xDC, 0x00030003},
+    {0xF0, 0x0FFF0FFF}, {0xF1, 0x00FFFFFF}, {0xF2, 0x000F000F}, {0xF4, 0x00030003},
+    {0xF8, 0x0FFF0FFF}, {0xF9, 0x00FFFFFF}, {0xFA, 0x000F000F}, {0xFC, 0x00030003},
+    // lighting (zero when lighting is off)
+    {0x1C2, 7}, {0x1C3, ~0u}, {0x1C4, ~0u}, {0x1D0, ~0u}, {0x1D1, ~0u}, {0x1D2, ~0u}, {0x1D9, ~0u},
+    {0x149, 0xF}, {0x159, 0xF}, {0x169, 0xF}, {0x179, 0xF}, {0x189, 0xF}, {0x199, 0xF}, {0x1A9, 0xF}, {0x1B9, 0xF},
+};
+#define FS_NREGS (sizeof k_fs_regs / sizeof k_fs_regs[0])
+#define FS_LIGHT_FIRST 30
+const char* pica_fs_dump_path;
+
+static void fs_values(u32* v) {
+    const u32* r = g_pica.reg;
+    int lit = (r[0x8F] & 1) && !(r[0x1C6] & 1);
+    for (u32 k = 0; k < FS_NREGS; k++)
+        v[k] = (k >= FS_LIGHT_FIRST && !lit) ? 0 : r[k_fs_regs[k][0]] & k_fs_regs[k][1];
+    v[FS_NREGS] = (r[0x6D] & 1) ? 0 : 1;   // w-buffer
+}
+
+void pica_fs_dump(u64 h, const char* path) {
+    u32 v[FS_NREGS + 1];
+    fs_values(v);
+    FILE* f = fopen(path, "ab");
+    if (!f) return;
+    u32 hdr[4] = {0x31534650u /* "PFS1" */, (u32)h, (u32)(h >> 32), (u32)FS_NREGS};
+    fwrite(hdr, 4, 4, f);
+    for (u32 k = 0; k < FS_NREGS; k++) { u32 pair[2] = {k_fs_regs[k][0], v[k]}; fwrite(pair, 4, 2, f); }
+    fwrite(&v[FS_NREGS], 4, 1, f);
+    fclose(f);
+}
+
+u64 pica_fs_key(void) {
+    u32 v[FS_NREGS + 1];
+    fs_values(v);
+    u64 h = 0x84222325CBF29CE4ull;   // a different start from the vertex keys
+    for (u32 k = 0; k <= FS_NREGS; k++) h = fnv(h, v[k]);
+    if (pica_fs_dump_path) {
+        static u64 seen_keys[4096];
+        static unsigned nseen;
+        for (unsigned k = 0; k < nseen; k++) if (seen_keys[k] == h) return h;
+        if (nseen < 4096) seen_keys[nseen++] = h;
+        pica_fs_dump(h, pica_fs_dump_path);
+    }
+    return h;
+}
+
 // Render-target statistics for planning the GPU renderer's speed work: which surfaces are drawn to,
 // and how often a draw samples a texture that an earlier draw rendered (render to texture).
 #define RT_MAX 64
@@ -301,6 +357,7 @@ static void draw(int indexed) {
     g_pica.draws++;
     rt_stats();
     if (pica_vs_dump_path) pica_vs_key();
+    if (pica_fs_dump_path) pica_fs_key();
     if (pica_vs_check_hook) pica_vs_check_hook();
     if (pica_vtime < 0) pica_vtime = getenv("MSR_VTIME") ? 1 : 0;
     if (pica_vtime) vtime_draw(indexed);

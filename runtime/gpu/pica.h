@@ -65,7 +65,11 @@ float pica_f24(u32 v);
 // The current vertex shader configuration's key (program, entry point, output setup).
 u64 pica_vs_key(void);
 extern const char* pica_vs_dump_path;
-void pica_vs_dump(u64 key, const char* path);   // appends the current configuration to a dump file   // when set, new configurations are appended to this file
+void pica_vs_dump(u64 key, const char* path);
+// The same for the fragment pipeline's configuration (which combiner and lighting paths a draw uses).
+u64 pica_fs_key(void);
+void pica_fs_dump(u64 key, const char* path);
+extern const char* pica_fs_dump_path;   // appends the current configuration to a dump file   // when set, new configurations are appended to this file
 // Runs the vertex shader for one vertex: inputs v0..v15, writes the outputs o0..o15.
 void pica_shader_run(ShaderUnit* u, const u32* reg_block, const Vec4* in, Vec4* out);
 // Maps shader outputs to vertex attributes with GPUREG_SH_OUTMAP.

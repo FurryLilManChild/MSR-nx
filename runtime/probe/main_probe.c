@@ -111,6 +111,8 @@ int main(int argc, char** argv) {
         extern unsigned msr_frame_every;
         const char* e = getenv("MSR_SECONDS");
         if (e) msr_time_limit_ns = (u64)atoi(e) * 1000000000ull;
+        e = getenv("MSR_FS_DUMP");   // file to collect the fragment configurations in
+        if (e) { extern const char* pica_fs_dump_path; pica_fs_dump_path = e; }
         e = getenv("MSR_VS_DUMP");   // file to collect the game's vertex shader configurations in
         if (e) { extern const char* pica_vs_dump_path; pica_vs_dump_path = e; }
         e = getenv("MSR_FRAME_EVERY");

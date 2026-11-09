@@ -21,7 +21,12 @@ layout (std140, binding = 1) uniform FragmentState {
     vec4 depth;       // x scale, y offset, z 1 for a w-buffer
 };
 
-uint reg(uint id) { uint i = id - 0x80u; return regs[i >> 2][i & 3u]; }
+uint dreg(uint id) { uint i = id - 0x80u; return regs[i >> 2][i & 3u]; }
+// The shader pack's fragment shaders replace the next two lines with constants for the registers
+// that choose what the shader does (tools/shaders/pica2glsl.py, fragment_shader()); everything else
+// still comes from the uniform block. Keep reg() for those registers and dreg() for values.
+uint reg(uint id) { return dreg(id); }   // MSR-STRUCTURAL
+bool wbuffer() { return depth.z != 0.0; }   // MSR-WBUFFER
 vec4 rgba8(uint v) { return vec4(float(v & 0xFFu), float((v >> 8) & 0xFFu), float((v >> 16) & 0xFFu), float(v >> 24)) / 255.0; }
 
 vec4 prim, fprim, fsec, texc[4], prevc, bufc;
@@ -255,11 +260,11 @@ void main() {
     uint at = reg(0x104u);
     if ((at & 1u) != 0u) {
         float a8 = floor(prevc.a * 255.0 + 0.5);
-        if (!alpha_ok((at >> 4) & 7u, a8, float((at >> 8) & 0xFFu))) discard;
+        if (!alpha_ok((at >> 4) & 7u, a8, float((dreg(0x104u) >> 8) & 0xFFu))) discard;
     }
     out_color = prevc;
     // PICA depth: (z/w * scale + offset), times w for a w-buffer. gl_FragCoord.z is -z/w here.
     float d = -gl_FragCoord.z * depth.x + depth.y;
-    if (depth.z != 0.0) d *= 1.0 / gl_FragCoord.w;
+    if (wbuffer()) d *= 1.0 / gl_FragCoord.w;
     gl_FragDepth = clamp(d, 0.0, 1.0);
 }
