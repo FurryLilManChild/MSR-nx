@@ -31,6 +31,12 @@ static DkDevice g_dev;
 static DkQueue g_q;
 static Mutex* g_qlock;
 static DkMemBlock g_code, g_dyn, g_img, g_cmdmem, g_ubo;
+// Readbacks land in CPU-cached memory: reading the uncached dynamic area cost about 2 ms per
+// 240x400 picture on test 4. The CPU's cache lines for it are invalidated before each read.
+#define RB_SIZE (2u << 20)
+static DkMemBlock g_rb;
+static u8* g_rb_cpu;
+static DkGpuAddr g_rb_gpu;
 static DkCmdBuf g_cmd;
 static DkShader g_vsh, g_fsh;
 static u8* g_dyn_cpu;
@@ -164,17 +170,16 @@ static void surf_upload(Surf* s) {
 static void surf_readback(Surf* s) {
     if (s->depth || !s->gpu_dirty) { s->gpu_dirty = 0; return; }
     MSR_PERF_BEGIN(PERF_READBACK);
-    u32 off = dyn_alloc(s->w * s->h * 4, 256);
+    u32 bytes = s->w * s->h * 4;
+    if (bytes > RB_SIZE) { s->gpu_dirty = 0; return; }
     DkImageView v;
     dkImageViewDefaults(&v, &s->img);
-    DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
+    DkCopyBuf cb = {g_rb_gpu, 0, 0};
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
     dkCmdBufCopyImageToBuffer(g_cmd, &v, &r, &cb, 0);
-    // the readback area must survive the flush that waits for it
-    u32 keep = g_dyn_pos;
     flush(1);
-    (void)keep;
-    const u8* src = g_dyn_cpu + off;
+    armDCacheFlush(g_rb_cpu, bytes);   // drop any stale lines before reading what the GPU wrote
+    const u8* src = g_rb_cpu;
     u8* dst = g_mem + s->addr;
     u32 bpp = k_bpp[s->fmt];
     if (s->fmt == 0 && !(s->w & 7) && !(s->h & 7)) rgba8_tile(src, dst, s->w, s->h);
@@ -867,6 +872,11 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     dkMemBlockMakerDefaults(&mm, dev, DYN_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     g_dyn = dkMemBlockCreate(&mm);
+    dkMemBlockMakerDefaults(&mm, dev, RB_SIZE);
+    mm.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
+    g_rb = dkMemBlockCreate(&mm);
+    g_rb_cpu = (u8*)dkMemBlockGetCpuAddr(g_rb);
+    g_rb_gpu = dkMemBlockGetGpuAddr(g_rb);
     g_dyn_cpu = (u8*)dkMemBlockGetCpuAddr(g_dyn);
     g_dyn_gpu = dkMemBlockGetGpuAddr(g_dyn);
 

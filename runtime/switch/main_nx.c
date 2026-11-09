@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
+#include "frame_plan.h"
 #include "msr_cpu.h"
 #include "msr_log.h"
 #include "msr_mem.h"
@@ -257,18 +258,6 @@ static char g_run_dir[128];
 extern const u8 msr_pack_data[] __attribute__((weak));
 extern const u8 msr_pack_end[] __attribute__((weak));
 
-// ---- the comparison cycle ---------------------------------------------------------------------------
-// Test builds switch the renderer's shader choice every 20 seconds by themselves, so one launch
-// measures and pictures every combination: no files to move between runs.
-typedef struct { int vs_interp, fs_general; const char* name; } Mode;
-static const Mode k_modes[] = {
-    {0, 0, "translated vertex shaders, specialized fragment shaders"},
-    {1, 0, "interpreter vertex shader, specialized fragment shaders"},
-    {0, 1, "translated vertex shaders, general fragment shader"},
-    {1, 1, "interpreter vertex shader, general fragment shader (as test 2)"},
-};
-#define MODE_SECONDS 20
-
 int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
 static u32 g_shot_buf[400 * 240];
 static u8 g_shot_rgb[400 * 240 * 3];
@@ -371,7 +360,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 4b (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 5 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -416,14 +405,10 @@ int main(int argc, char** argv) {
     g_start_ns = msr_now_ns();
     unsigned long long next_report = g_start_ns + 5000000000ull;
     unsigned last_swaps = 0;
-    int mode = 0, reports = 0;
+    int reports = 0;
     unsigned long long shot_at = g_start_ns + 5000000000ull;
     void dkr_force_general(int vs, int fs);
-    if (g_gpu_render) {
-        msr_receipt("mode 1 of %d: %s (modes change every %d s)", (int)(sizeof k_modes / sizeof k_modes[0]),
-                    k_modes[0].name, MODE_SECONDS);
-        dkr_force_general(0, 0);
-    }
+    if (g_gpu_render) dkr_force_general(0, 0);   // the shader pack, with the general shaders only for misses
     while (appletMainLoop()) {
         input_poll();
         present();
@@ -434,8 +419,8 @@ int main(int argc, char** argv) {
             unsigned sw = msr_fb[0].swaps;
             u32 ccpu, cgpu, cmem;
             clocks(&ccpu, &cgpu, &cmem);
-            msr_receipt("speed at %.0f s (mode %d): %.1f top-screen pictures per second; clocks CPU %u MHz, GPU %u MHz, memory %u MHz",
-                        (now - g_start_ns) / 1e9, mode + 1, (sw - last_swaps) / secs, ccpu / 1000000, cgpu / 1000000,
+            msr_receipt("speed at %.0f s: %.1f top-screen pictures per second; clocks CPU %u MHz, GPU %u MHz, memory %u MHz",
+                        (now - g_start_ns) / 1e9, (sw - last_swaps) / secs, ccpu / 1000000, cgpu / 1000000,
                         cmem / 1000000);
             msr_perf_report(secs);
             if (g_gpu_render) {
@@ -446,19 +431,19 @@ int main(int argc, char** argv) {
                 void dkr_fs_stats(unsigned* hits, unsigned* misses);
                 dkr_fs_stats(&h, &m);
                 msr_receipt("  fragment shaders: %u draws specialized, %u on the general one", h, m);
+                static unsigned last_skip, last_total;
+                msr_receipt("  frame plan: %u of %u GPU operations skipped (right eye and other unseen work)",
+                            fp_skipped_ops - last_skip, fp_total_ops - last_total);
+                last_skip = fp_skipped_ops; last_total = fp_total_ops;
             }
             last_swaps = sw;
             next_report = now + 5000000000ull;
-            if (g_gpu_render && ++reports % (MODE_SECONDS / 5) == 0) {
-                mode = (mode + 1) % (int)(sizeof k_modes / sizeof k_modes[0]);
-                dkr_force_general(k_modes[mode].vs_interp, k_modes[mode].fs_general);
-                msr_receipt("mode %d: %s", mode + 1, k_modes[mode].name);
-                shot_at = now + 5000000000ull;
-            }
+            // pictures of both screens every 30 seconds, for comparing against the reference renderer
+            if (++reports % 6 == 0) shot_at = now;
         }
         if (shot_at && now >= shot_at) {
             char tag[48];
-            snprintf(tag, sizeof tag, "t%03d_mode%d", (int)((now - g_start_ns) / 1000000000ull), mode + 1);
+            snprintf(tag, sizeof tag, "t%03d", (int)((now - g_start_ns) / 1000000000ull));
             save_shots(tag);
             shot_at = 0;
         }

@@ -1,5 +1,22 @@
 # Progress log (newest first)
 
+## 2026-11-08 (night): tests 4 and 5, right eye skipped
+
+- Test 4 (one launch cycling four shader modes, pictures saved by the build): mode 1 (translated
+  vertex shaders, specialized fragment shaders) looked correct and ran about 10 pictures per second
+  at CPU 1020 / GPU 307 / memory 1331 MHz; the old shaders ran 3 to 7. Mode 1 is now the only mode.
+- Fragment specialization (tools/shaders/fsgen.py): pica_fsh.glsl with the configuration registers
+  as constants; 33 configurations, 9 to 39 registers, no spill.
+- The game renders both eyes every frame (its slider read at 0x21B630 returns 0, both eyes are drawn
+  anyway). runtime/gpu/frame_plan.c records each frame's GPU operations with the memory they read
+  and write, works out which ones feed the shown left framebuffers, and skips the rest next frame
+  when the same operation comes up at the same position. Probe check over 240 s of title, intro and
+  gameplay: 41% of GPU operations skipped, all 150 saved pictures byte-identical to a run without
+  skipping (MSR_NOSKIP=1).
+- Readbacks go through a CPU-cached buffer (the uncached dynamic area cost about 2 ms each).
+- Remaining costs to attack next: texture copies and display transfers of GPU pictures run through
+  the CPU (readback, convert, re-upload), and vertex attributes are decoded on the CPU.
+
 ## 2026-11-08 (afternoon and evening): Switch tests 1 to 3, speed
 
 - Switch test 1 (deko3d renderer): reached the title screen, picture upside down (reflected top to

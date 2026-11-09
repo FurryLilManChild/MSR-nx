@@ -3,6 +3,7 @@
 // gsp.rs and 3dbrew.
 #include <stdio.h>
 #include <stdlib.h>
+#include "frame_plan.h"
 #include <string.h>
 #include "hle.h"
 #include "msr_log.h"
@@ -154,7 +155,14 @@ static void gsp_interrupt(int id) {
 
 unsigned msr_gx_counts[8];
 
-unsigned gx_stat[4];   // DMA, fills, display transfers, texture copies
+unsigned gx_stat[4];
+// MSR_GXTRACE=N: every GX command and draw of top-screen pictures N and N+1 goes to the receipt.
+int msr_gx_trace(void) {
+    static int start = -2;
+    if (start == -2) { const char* e = getenv("MSR_GXTRACE"); start = e ? atoi(e) : -1; }
+    extern unsigned msr_top_swaps(void);
+    return start >= 0 && msr_top_swaps() >= (unsigned)start && msr_top_swaps() < (unsigned)start + 2;
+}   // DMA, fills, display transfers, texture copies
 
 static void gx_command(u32 entry) {
     u32 id = rd32(entry) & 0xFF, d[7];
@@ -163,6 +171,8 @@ static void gx_command(u32 entry) {
     switch (id) {
     case 0x00:  // RequestDma(source, destination, size)
         gx_stat[0]++;
+        { u32 rr[2] = {d[0], d[0] + d[2]}, ww[2] = {d[1], d[1] + d[2]};
+          fp_op(FP_DMA, ((u64)d[0] << 32) ^ d[1], rr, 1, ww, 1, 1); }   // always runs: the game's own data
         if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
         if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
         if (pica_invalidate_hook) pica_invalidate_hook(d[1], d[2]);
@@ -179,18 +189,27 @@ static void gx_command(u32 entry) {
         for (int b = 0; b < 2; b++) {
             u32 start = d[b * 3], value = d[b * 3 + 1], end = d[b * 3 + 2];
             if (!start || end <= start) continue;
+            { u32 ww[2] = {start, end};
+              if (!fp_op(FP_FILL, ((u64)start << 32) ^ end, 0, 0, ww, 1, 1)) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; } }
             if (pica_fill_hook) pica_fill_hook(start, end, value, (d[6] >> (16 * b + 8)) & 3);
             u32 ctl = d[6] >> (16 * b), width = (ctl >> 8) & 3;   // bit 8: 24 bit, bit 9: 32 bit, neither: 16
             if (width == 0) for (u32 a = start; a + 2 <= end; a += 2) wr16(a, (u16)value);
             else if (width & 2) for (u32 a = start; a + 4 <= end; a += 4) wr32(a, value);
             else for (u32 a = start; a + 3 <= end; a += 3) { wr8(a, (u8)value); wr8(a + 1, (u8)(value >> 8)); wr8(a + 2, (u8)(value >> 16)); }
-            msr_log("gx: fill %08X..%08X with %08X (width %u)", start, end, value, width);
+            { msr_log("gx: fill %08X..%08X with %08X (width %u)", start, end, value, width); if (msr_gx_trace()) msr_receipt("trace: fill %08X..%08X with %08X (width %u)", start, end, value, width); }
             gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0);
         }
         break;
     case 0x03:  // DisplayTransfer(input, output, input size, output size, flags)
         gx_stat[2]++;
-        msr_log("gx: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]);
+        { msr_log("gx: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]); if (msr_gx_trace()) msr_receipt("trace: display transfer %08X -> %08X (%08X %08X flags %08X)", d[0], d[1], d[2], d[3], d[4]); }
+        {
+            static const u32 bpp[8] = {4, 3, 2, 2, 2, 4, 4, 4};
+            u32 fi = (d[4] >> 8) & 7, fo = (d[4] >> 12) & 7, down = (d[4] >> 24) & 3;
+            u32 ow = (d[3] & 0xFFFF) / (down ? 2 : 1), oh = (d[3] >> 16) / (down == 2 ? 2 : 1);
+            u32 rr[2] = {d[0], d[0] + (d[2] & 0xFFFF) * (d[2] >> 16) * bpp[fi]}, ww[2] = {d[1], d[1] + ow * oh * bpp[fo]};
+            if (!fp_op(FP_TRANSFER, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[4] << 16), rr, 1, ww, 1, 1)) { gsp_interrupt(IRQ_PPF); break; }
+        }
         if (pica_sync_hook) pica_sync_hook(d[0], (d[2] & 0xFFFF) * (d[2] >> 16) * 4);
         { MSR_PERF_BEGIN(PERF_TRANSFER); pica_display_transfer(d[0], d[1], d[2], d[3], d[4]); MSR_PERF_END(PERF_TRANSFER); }
         if (pica_invalidate_hook) pica_invalidate_hook(d[1], (d[3] & 0xFFFF) * (d[3] >> 16) * 4);
@@ -198,10 +217,12 @@ static void gx_command(u32 entry) {
         break;
     case 0x04:  // TextureCopy(input, output, size, input gap, output gap, flags)
         gx_stat[3]++;
-        msr_log("gx: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]);
+        { msr_log("gx: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]); if (msr_gx_trace()) msr_receipt("trace: texture copy %08X -> %08X size %X gaps %08X %08X flags %08X", d[0], d[1], d[2], d[3], d[4], d[5]); }
         {
             u32 iw = (d[3] & 0xFFFF) * 16, ig = (d[3] >> 16) * 16, ow = (d[4] & 0xFFFF) * 16, og = (d[4] >> 16) * 16;
             u32 in_span = iw ? d[2] + d[2] / iw * ig : d[2], out_span = ow ? d[2] + d[2] / ow * og : d[2];
+            u32 rr[2] = {d[0], d[0] + in_span}, ww[2] = {d[1], d[1] + out_span};
+            if (!fp_op(FP_COPY, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[2] << 8), rr, 1, ww, 1, ig == 0 && og == 0)) { gsp_interrupt(IRQ_PPF); break; }
             if (pica_sync_hook) pica_sync_hook(d[0], in_span);
             { MSR_PERF_BEGIN(PERF_TEXCOPY); pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]); MSR_PERF_END(PERF_TEXCOPY); }
             if (pica_invalidate_hook) pica_invalidate_hook(d[1], out_span);
@@ -235,6 +256,7 @@ static void gx_run_queue(void) {
 // takes it at the next vblank and clears dirty. The renderer will read msr_fb[].
 typedef struct { u32 left, right, stride, format; unsigned swaps; } MsrFramebuffer;
 MsrFramebuffer msr_fb[2];
+unsigned msr_top_swaps(void) { return msr_fb[0].swaps; }
 
 static void gsp_latch_framebuffers(void) {
     u32 base = gsp_shared();
@@ -253,6 +275,30 @@ static void gsp_latch_framebuffers(void) {
                     msr_fb[screen].stride, msr_fb[screen].format);
         wr8(rec + 1, 0);
         pica_frame_shown(screen, msr_fb[screen].left, msr_fb[screen].stride, msr_fb[screen].format);
+        {
+            // what the Switch shows: the left image of each screen, in every buffer the game has
+            // shown it in (games double-buffer, so the next picture goes to the one not shown now)
+            static u32 seen[2][4], nseen[2];
+            u32 a = msr_fb[screen].left, v = pica_vaddr(a), bytes;
+            if (v) a = v;
+            bytes = (screen ? 320u : 400u) * (msr_fb[screen].stride ? msr_fb[screen].stride : 240 * 3);
+            int known = 0;
+            for (u32 k = 0; k < nseen[screen]; k++) if (seen[screen][k] == a) known = 1;
+            if (!known && a && nseen[screen] < 4) seen[screen][nseen[screen]++] = a;
+            if (screen == 0) {
+                u32 out[16];
+                unsigned n = 0;
+                for (int sc = 0; sc < 2; sc++)
+                    for (u32 k = 0; k < nseen[sc]; k++) {
+                        u32 b = (sc ? 320u : 400u) * (msr_fb[sc].stride ? msr_fb[sc].stride : 240 * 3);
+                        out[2 * n] = seen[sc][k];
+                        out[2 * n + 1] = seen[sc][k] + b;
+                        n++;
+                    }
+                fp_frame_end(out, n);
+            }
+            (void)bytes;
+        }
     }
 }
 

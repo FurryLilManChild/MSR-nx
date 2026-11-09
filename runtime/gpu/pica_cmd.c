@@ -10,6 +10,7 @@
 #include <string.h>
 #include "msr_log.h"
 #include "pica.h"
+#include "frame_plan.h"
 #include <stdio.h>
 #include <time.h>
 
@@ -338,6 +339,7 @@ static void rt_stats(void) {
     if (any) pica_stat_rtt_draws++;
 }
 void pica_rt_summary(void) {
+    msr_receipt("frame plan: %u of %u GPU operations skipped (they fed no shown screen)", fp_skipped_ops, fp_total_ops);
     if (pica_vtime > 0)
         msr_receipt("vertex fetch: %llu vertices decoded in %.1f ms of CPU time", g_vtime_verts, g_vtime_ns / 1e6);
     extern unsigned gx_stat[4];
@@ -350,15 +352,54 @@ void pica_rt_summary(void) {
                     ((g_rt_wh[k] >> 12) & 0x3FF) + 1, g_rt_draws[k], g_rt_sampled[k]);
 }
 
+// What a draw reads and writes, for frame_plan.c. Texture sizes from the PICA format's bits per texel.
+static const u8 k_tex_bits[16] = {32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8, 0, 0};
+static u32 va_of(u32 paddr) { u32 v = pica_vaddr(paddr); return v ? v : paddr; }
+int pica_plan_draw(u32 nverts) {
+    const u32* r = g_pica.reg;
+    u32 w = r[0x11E] & 0x7FF, h = ((r[0x11E] >> 12) & 0x3FF) + 1;
+    u32 cfmt = (r[0x117] >> 16) & 7, cbpp = cfmt == 0 ? 4 : cfmt == 1 ? 3 : 2;
+    u32 dfmt = r[0x116] & 3, dbpp = dfmt == 0 ? 2 : dfmt == 3 ? 4 : 3;
+    u32 c = va_of(r[0x11D] << 3), d = va_of(r[0x11C] << 3);
+    u32 rd[12], wr[4];
+    unsigned nrd = 0, nwr = 0;
+    int dest_read = (r[0x112] & 0xF) != 0 || nverts != 6;
+    if (r[0x113] & 0xF) { wr[2 * nwr] = c; wr[2 * nwr + 1] = c + w * h * cbpp; nwr++; }
+    if (r[0x115] & 3) { wr[2 * nwr] = d; wr[2 * nwr + 1] = d + w * h * dbpp; nwr++; }
+    if (dest_read && (r[0x113] & 0xF)) { rd[2 * nrd] = c; rd[2 * nrd + 1] = c + w * h * cbpp; nrd++; }
+    if ((r[0x114] & 3) || (dest_read && (r[0x115] & 3))) { rd[2 * nrd] = d; rd[2 * nrd + 1] = d + w * h * dbpp; nrd++; }
+    static const u32 k_unit[3][3] = {{0x85, 0x82, 0x8E}, {0x95, 0x92, 0x96}, {0x9D, 0x9A, 0x9E}};
+    u64 sig = 0xCBF29CE484222325ull;
+    for (int u = 0; u < 3; u++) {
+        if (!((r[0x80] >> u) & 1)) continue;
+        u32 a = va_of(r[k_unit[u][0]] << 3), tw = r[k_unit[u][1]] >> 16, th = r[k_unit[u][1]] & 0x7FF;
+        u32 bytes = tw * th * k_tex_bits[r[k_unit[u][2]] & 15] / 8;
+        rd[2 * nrd] = a; rd[2 * nrd + 1] = a + bytes; nrd++;
+        sig = fnv(sig, a);
+    }
+    sig = fnv(sig, c);
+    sig = fnv(sig, d);
+    sig = fnv(sig, nverts);
+    return fp_op(FP_DRAW, sig, rd, nrd, wr, nwr, !dest_read);
+}
+
 static void draw(int indexed) {
     const u32* r = g_pica.reg;
     u32 n = r[0x228], first = r[0x22A];
     if (n > MAX_DRAW) n = MAX_DRAW;
     g_pica.draws++;
+    if (!pica_plan_draw(n)) return;   // feeds no shown screen this frame
     rt_stats();
     if (pica_vs_dump_path) pica_vs_key();
     if (pica_fs_dump_path) pica_fs_key();
     if (pica_vs_check_hook) pica_vs_check_hook();
+    { extern int msr_gx_trace(void);
+      if (msr_gx_trace()) {
+          const u32* q = g_pica.reg;
+          msr_receipt("trace: draw %u verts to %08X (%ux%u fmt %u) depth %08X, tex0 %08X %ux%u fmt %u, tex1 %08X, tex2 %08X, on %X",
+                      q[0x228], q[0x11D] << 3, q[0x11E] & 0x7FF, ((q[0x11E] >> 12) & 0x3FF) + 1, (q[0x117] >> 16) & 7,
+                      q[0x11C] << 3, q[0x85] << 3, q[0x82] >> 16, q[0x82] & 0x7FF, q[0x8E] & 15, q[0x95] << 3, q[0x9D] << 3, q[0x80] & 7);
+      } }
     if (pica_vtime < 0) pica_vtime = getenv("MSR_VTIME") ? 1 : 0;
     if (pica_vtime) vtime_draw(indexed);
     if (pica_draw_hook && pica_draw_hook(indexed)) { g_pica.vertices += n; if (indexed) g_pica.draws_indexed++; return; }
@@ -414,6 +455,7 @@ static void immediate_vertex(void) {
 
 static void flush_immediate(void) {
     if (!g_imm_n) return;
+    if (!pica_plan_draw(g_imm_n)) { g_imm_n = 0; return; }
     assemble_and_draw(g_verts, g_imm_n);
     g_imm_n = 0;
 }
