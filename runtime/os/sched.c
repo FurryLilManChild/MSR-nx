@@ -223,9 +223,23 @@ static u64 next_timer(void) {
 }
 
 // Gives the CPU to the best ready thread and returns when this thread runs again.
+// The port menu pauses the game: the running thread holds here at its next switch, and the clock
+// leaves out the paused time.
+volatile int sched_pause_request;
+static void pause_point(void) {
+    if (!sched_pause_request || !sched_realtime) return;
+    u64 t0 = wall_ns();
+    while (sched_pause_request) {
+        struct timespec ts = {0, 5000000};
+        nanosleep(&ts, 0);
+    }
+    g_rt_start += wall_ns() - t0;
+}
+
 void sched_switch(void) {
     GThread* me = g_cur;
     for (;;) {
+        pause_point();
         GThread* next = pick();
         if (me->state == T_READY && (!next || next->prio > me->prio || next == me)) next = me;
         if (!next) {

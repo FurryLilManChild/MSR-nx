@@ -22,6 +22,7 @@
 #include <switch.h>
 #include "msr_log.h"
 #include "pica.h"
+#include "vsgen.h"
 #include "dk_shaders.h"   // generated at build time from the .glsl files (uam)
 
 #define DYN_SIZE (32u << 20)
@@ -1092,6 +1093,11 @@ static u32 g_pack_n;
 static DkMemBlock g_pack_code;
 static char g_new_path[256], g_fs_new_path[256];
 static unsigned g_vs_hits, g_vs_misses;
+static const DkShader* rt_find(u64 key);
+static int compile_request(u64 key, int vert, int ez);
+static void fs_compile_poll(void);
+static volatile unsigned g_jobs_live;
+static unsigned g_rt_version;
 static int g_force_vs_interp, g_force_fs_general;
 // Comparison switches for tests: run every draw on the interpreter vertex shader and/or the general
 // fragment shader, as test builds 1 and 2 did.
@@ -1149,23 +1155,28 @@ static int first_miss(u64 key) {
     return 1;
 }
 
+static unsigned g_rt_version_seen_vs;
 static const DkShader* vs_select(void) {
     static u64 last_key;
     static const DkShader* last = 0;
     static unsigned seen_version;
     u64 key = pica_vs_key();
+    if (g_jobs_live) fs_compile_poll();
     if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
+    if (g_rt_version_seen_vs != g_rt_version) { g_rt_version_seen_vs = g_rt_version; last = 0; }
     if (last && key == last_key) { if (last == &g_vsh) g_vs_misses++; else g_vs_hits++; return last; }
     last_key = key;
     const DkShader* sh = g_force_vs_interp ? 0 : pack_find(key);
+    if (!sh && !g_force_vs_interp) sh = rt_find(key);
     if (sh) { g_vs_hits++; return last = sh; }
     if (g_force_vs_interp) { g_vs_misses++; return last = &g_vsh; }
     g_vs_misses++;
     if (first_miss(key)) {
-        msr_receipt("gpu: vertex shader %016llX is not in the pack; it runs on the interpreter (saved to vs_new.bin)",
+        msr_receipt("gpu: vertex shader %016llX is not in the pack; compiling it on the Switch, the interpreter meanwhile (saved to vs_new.bin)",
                     (unsigned long long)key);
         pica_vs_dump(key, g_new_path);
     }
+    if (compile_request(key, 1, 0)) { last = 0; return &g_vsh; }   // asks again next draw until it is ready
     return last = &g_vsh;
 }
 
@@ -1176,10 +1187,6 @@ static unsigned g_fs_hits, g_fs_misses;
 // out those frames rather than run on the general shader).
 #define EZ_BIT (1ull << 63)
 static unsigned g_ez_draws, g_fs_waits;
-static const DkShader* rt_find(u64 key);
-static int fs_compile_request(u64 key, int ez);
-static void fs_compile_poll(void);
-static volatile unsigned g_jobs_live;
 static const DkShader* fs_select(int* ez) {
     static u64 last_key;
     static int last_ez;
@@ -1219,7 +1226,7 @@ static const DkShader* fs_select(int* ez) {
                     (unsigned long long)base);
         pica_fs_dump(base, g_fs_new_path);
     }
-    if (fs_compile_request(key, want_ez)) { g_fs_waits++; last = 0; return 0; }
+    if (compile_request(key, 0, want_ez)) { g_fs_waits++; last = 0; return 0; }
     g_fs_misses++;
     last_key = key; last_ez = 0;
     return last = &g_fsh;
@@ -1228,13 +1235,16 @@ static const DkShader* fs_select(int* ez) {
 void dkr_fs_stats(unsigned* hits, unsigned* misses, unsigned* waits) { *hits = g_fs_hits; *misses = g_fs_misses; *waits = g_fs_waits; g_fs_hits = g_fs_misses = g_fs_waits = 0; }
 unsigned dkr_ez_stats(void) { unsigned n = g_ez_draws; g_ez_draws = 0; return n; }
 
-// ---- fragment shaders compiled on the Switch ----------------------------------------------------
-// A configuration missing from the pack is specialized here exactly as tools/shaders/fsgen.py does
-// (pica_fsh.glsl with the configuration's registers as constants) and compiled by uam, the same
-// compiler the pack is built with, linked in from tools/switch/uam. A worker thread compiles; the
-// result goes to sdmc:/switch/msr/shadercache, which is loaded at start, so each configuration is
-// compiled once per SD card.
+// ---- shaders compiled on the Switch -------------------------------------------------------------
+// A configuration missing from the pack is turned into GLSL here exactly as the pack's tools do
+// (fragment: pica_fsh.glsl with the configuration's registers as constants, as fsgen.py; vertex:
+// vsgen.c, the C version of pica2glsl.py) and compiled by uam, the same compiler the pack is built
+// with, linked in from tools/switch/uam. One worker thread compiles (uam's front end is shared
+// state, so two at once are not safe); the result goes to sdmc:/switch/msr/shadercache, which is
+// loaded at start, so each configuration is compiled once per SD card. A fragment shader's draws
+// wait for it; a vertex shader's draws run on the interpreter meanwhile.
 int msr_uam_compile_frag(const char* glsl, const char* out_path);   // tools/switch/uam/uam_iface.cpp
+int msr_uam_compile_vert(const char* glsl, const char* out_path);
 #define RT_CODE_SIZE (16u << 20)
 #define RT_MAX 2048
 #define MAX_JOBS 64
@@ -1244,7 +1254,7 @@ static u32 g_rt_n, g_rt_pos;
 static DkMemBlock g_rt_code;
 static char g_cache_dir[256];
 enum { JOB_FREE, JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_FAILED };
-typedef struct { int state; u64 key; char* glsl; u8* dksh; u32 size; u32 ms; } Job;
+typedef struct { int state, vert; u64 key; char* glsl; u8* dksh; u32 size; u32 ms; } Job;
 static Job g_jobs[MAX_JOBS];
 static Mutex g_jmutex;
 static CondVar g_jcond;
@@ -1269,6 +1279,7 @@ static int rt_install(u64 key, const u8* dksh, u32 size) {
     g_rt[g_rt_n].key = key;
     g_rt_n++;
     g_rt_pos = pos + size;
+    g_rt_version++;
     return 1;
 }
 
@@ -1327,9 +1338,10 @@ static void compile_thread(void* arg) {
         mutexUnlock(&g_jmutex);
         u64 t0 = armGetSystemTick();
         char tmp[300], final[300];
-        snprintf(tmp, sizeof tmp, "%s/fs_%016llX.tmp", g_cache_dir, (unsigned long long)j->key);
-        snprintf(final, sizeof final, "%s/fs_%016llX.dksh", g_cache_dir, (unsigned long long)j->key);
-        int ok = msr_uam_compile_frag(j->glsl, tmp);
+        const char* pre = j->vert ? "vs" : "fs";
+        snprintf(tmp, sizeof tmp, "%s/%s_%016llX.tmp", g_cache_dir, pre, (unsigned long long)j->key);
+        snprintf(final, sizeof final, "%s/%s_%016llX.dksh", g_cache_dir, pre, (unsigned long long)j->key);
+        int ok = j->vert ? msr_uam_compile_vert(j->glsl, tmp) : msr_uam_compile_frag(j->glsl, tmp);
         u8* data = 0;
         long size = 0;
         if (ok) {
@@ -1365,12 +1377,12 @@ static void fs_compile_poll(void) {
         if (j->state == JOB_DONE) {
             if (!rt_install(j->key, j->dksh, j->size)) {
                 if (g_nfailed < 256) g_failed[g_nfailed++] = j->key;
-                msr_receipt("gpu: compiled fragment shader %016llX did not fit; it uses the general one", (unsigned long long)j->key);
+                msr_receipt("gpu: compiled %s shader %016llX did not fit", j->vert ? "vertex" : "fragment", (unsigned long long)j->key);
             } else {
                 g_compiled++;
                 g_compile_ms += j->ms;
                 if (j->ms > g_compile_max_ms) g_compile_max_ms = j->ms;
-                msr_receipt("gpu: fragment shader %016llX compiled on the Switch in %u ms", (unsigned long long)j->key, j->ms);
+                msr_receipt("gpu: %s shader %016llX compiled on the Switch in %u ms", j->vert ? "vertex" : "fragment", (unsigned long long)j->key, j->ms);
             }
             free(j->dksh);
             j->dksh = 0;
@@ -1378,7 +1390,8 @@ static void fs_compile_poll(void) {
             g_jobs_live--;
         } else if (j->state == JOB_FAILED) {
             if (g_nfailed < 256) g_failed[g_nfailed++] = j->key;
-            msr_receipt("gpu: fragment shader %016llX failed to compile on the Switch; it uses the general one", (unsigned long long)j->key);
+            msr_receipt("gpu: %s shader %016llX failed to compile on the Switch; it uses the %s", j->vert ? "vertex" : "fragment",
+                        (unsigned long long)j->key, j->vert ? "interpreter" : "general one");
             j->state = JOB_FREE;
             g_jobs_live--;
         }
@@ -1386,8 +1399,8 @@ static void fs_compile_poll(void) {
     mutexUnlock(&g_jmutex);
 }
 
-// 1: being compiled (the draw waits), 0: no compiler or it failed before (general shader).
-static int fs_compile_request(u64 key, int ez) {
+// 1: being compiled, 0: no compiler, or it failed before (general shader or interpreter).
+static int compile_request(u64 key, int vert, int ez) {
     if (!g_compiler_on) return 0;
     for (unsigned k = 0; k < g_nfailed; k++) if (g_failed[k] == key) return 0;
     mutexLock(&g_jmutex);
@@ -1398,8 +1411,25 @@ static int fs_compile_request(u64 key, int ez) {
         if (j->state == JOB_FREE && !free_j) free_j = j;
     }
     if (!free_j) { mutexUnlock(&g_jmutex); return 1; }   // queue full: wait a frame and ask again
-    char* src = fs_source(ez);
+    char* src;
+    if (vert) {
+        const u32* r = g_pica.reg;
+        VsConfig c;
+        c.code = g_pica.vs.program;
+        c.swz = g_pica.vs.swizzle;
+        c.entry = r[0x2BA] & 0xFFFF;
+        c.outmask = r[0x2BD];
+        c.total = r[0x4F] & 7;
+        for (int k = 0; k < 7; k++) c.outmap[k] = r[0x50 + k];
+        const char* why = 0;
+        src = vsgen_glsl(&c, &why);
+        if (!src) {
+            if (g_nfailed < 256) g_failed[g_nfailed++] = key;
+            msr_receipt("gpu: vertex shader %016llX cannot be translated (%s); it stays on the interpreter", (unsigned long long)key, why ? why : "?");
+        }
+    } else src = fs_source(ez);
     if (!src) { mutexUnlock(&g_jmutex); return 0; }
+    free_j->vert = vert;
     free_j->key = key;
     free_j->glsl = src;
     free_j->state = JOB_QUEUED;
@@ -1422,7 +1452,7 @@ void dkr_compiler_init(const char* cache_dir) {
         struct dirent* e;
         while ((e = readdir(d)) != 0) {
             const char* nm = e->d_name;
-            if (strncmp(nm, "fs_", 3) || strlen(nm) != 3 + 16 + 5 || strcmp(nm + 19, ".dksh")) continue;
+            if ((strncmp(nm, "fs_", 3) && strncmp(nm, "vs_", 3)) || strlen(nm) != 3 + 16 + 5 || strcmp(nm + 19, ".dksh")) continue;
             u64 key = strtoull(nm + 3, 0, 16);
             if (pack_find(key) || rt_find(key)) continue;
             char path[300];
@@ -1444,7 +1474,7 @@ void dkr_compiler_init(const char* cache_dir) {
     Result rc = threadCreate(&g_cthread, compile_thread, 0, 0, 4u << 20, 0x2C, 2);
     if (R_SUCCEEDED(rc)) rc = threadStart(&g_cthread);
     g_compiler_on = R_SUCCEEDED(rc);
-    msr_receipt("gpu: %u compiled fragment shaders loaded from %s; compiling on the Switch %s",
+    msr_receipt("gpu: %u compiled shaders loaded from %s; compiling on the Switch %s",
                 g_cache_loaded, cache_dir, g_compiler_on ? "is on" : "could not start");
 }
 

@@ -18,6 +18,7 @@
 #include "msr_log.h"
 #include "msr_mem.h"
 #include "sched.h"
+#include "port_menu.h"
 
 #define DIR "sdmc:/switch/msr"
 
@@ -61,8 +62,8 @@ static void* game_main(void* arg) {
 static DkDevice g_dev;
 static DkQueue g_queue;
 static DkSwapchain g_swap;
-static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem;
-static DkImage g_fb[2], g_scr[2];
+static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem;
+static DkImage g_fb[2], g_scr[2], g_panel_img;
 static DkCmdBuf g_cmd;
 static u32* g_upload;   // CPU-visible staging: top 400x240 then bottom 320x240, RGBA8
 static Mutex g_qlock;   // the game's renderer and the presenter share the queue
@@ -120,6 +121,23 @@ static void display_init(void) {
     g_up_mem = dkMemBlockCreate(&mm);
     g_upload = (u32*)dkMemBlockGetCpuAddr(g_up_mem);
 
+    // the port menu's panel: CPU-drawn pixels (staging, then an image for the blit)
+    {
+        DkImageLayout pl;
+        dkImageLayoutMakerDefaults(&lm, g_dev);
+        lm.flags = DkImageFlags_Usage2DEngine;
+        lm.format = DkImageFormat_RGBA8_Unorm;
+        lm.dimensions[0] = PANEL_W;
+        lm.dimensions[1] = PANEL_H;
+        dkImageLayoutInitialize(&pl, &lm);
+        u32 psz = (u32)dkImageLayoutGetSize(&pl), pal = dkImageLayoutGetAlignment(&pl);
+        u32 img_off = (PANEL_W * PANEL_H * 4 + pal - 1) & ~(pal - 1);
+        dkMemBlockMakerDefaults(&mm, g_dev, (img_off + psz + 0xFFFF) & ~0xFFFFu);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+        g_panel_mem = dkMemBlockCreate(&mm);
+        dkImageInitialize(&g_panel_img, &pl, g_panel_mem, img_off);
+    }
+
     dkMemBlockMakerDefaults(&mm, g_dev, 0x10000);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     g_cmd_mem = dkMemBlockCreate(&mm);
@@ -171,22 +189,28 @@ void dkr_frame_end(void);
 static int g_gpu_render;
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
-    // only convert the screens when the game showed a new picture on one of them
+    // only convert the screens when the game showed a new picture on one of them; the menu (open,
+    // or just closed) and a layout change redraw the output from the last pictures
     static unsigned seen[2] = {~0u, ~0u};
-    if (msr_fb[0].swaps == seen[0] && msr_fb[1].swaps == seen[1]) return;
+    static int last_layout = -1, menu_was_open;
+    int fresh = !(msr_fb[0].swaps == seen[0] && msr_fb[1].swaps == seen[1]);
+    int redraw = g_menu_open || menu_was_open || last_layout != g_set.layout;
+    if (!fresh && !redraw) return;
+    menu_was_open = g_menu_open;
+    last_layout = g_set.layout;
     seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
     MSR_PERF_BEGIN(PERF_PRESENT);
     // the GPU renderer converts the screens on the GPU from its copy of VRAM; otherwise (or for a
     // framebuffer outside VRAM) the CPU does it
     DkGpuAddr up = dkMemBlockGetGpuAddr(g_up_mem);
     int done0 = 0, done1 = 0;
-    if (g_gpu_render) {
+    if (fresh && g_gpu_render) {
         int dkr_record_screen(DkCmdBuf cmd, int screen, u32 addr, u32 stride, u32 format, DkGpuAddr out, u32 out_word);
         done0 = dkr_record_screen(g_cmd, 0, msr_fb[0].left, msr_fb[0].stride, msr_fb[0].format, up, 0);
         done1 = dkr_record_screen(g_cmd, 1, msr_fb[1].left, msr_fb[1].stride, msr_fb[1].format, up, 400 * 240);
     }
-    if (!done0) convert_screen(0, g_upload, 1);
-    if (!done1) convert_screen(1, g_upload + 400 * 240, 1);
+    if (fresh && !done0) convert_screen(0, g_upload, 1);
+    if (fresh && !done1) convert_screen(1, g_upload + 400 * 240, 1);
     mutexLock(&g_qlock);
     int slot = dkQueueAcquireImage(g_queue, g_swap);
     mutexUnlock(&g_qlock);
@@ -196,16 +220,34 @@ static void present(void) {
     dkCmdBufClearColorFloat(g_cmd, 0, DkColorMask_RGBA, 0, 0, 0, 1);
     for (int k = 0; k < 2; k++) {
         dkImageViewDefaults(&sv[k], &g_scr[k]);
+        if (!fresh) continue;   // the images still hold the last pictures
         u32 W = k ? 320 : 400;
         DkCopyBuf src = {up + (k ? 400 * 240 * 4 : 0), 0, 0};
         DkImageRect r = {0, 0, 0, W, 240, 1};
         dkCmdBufCopyBufferToImage(g_cmd, &src, &sv[k], &r, 0);
     }
-    // layout: the top screen large on the left (2.4x, 960x576), the bottom screen on the right (1x)
-    DkImageRect ts = {0, 0, 0, 400, 240, 1}, td = {0, 72, 0, 960, 576, 1};
-    DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {960, 240, 0, 320, 240, 1};
+    // the screens where the port menu's layout puts them
+    Rect tr, br;
+    port_menu_layout(&tr, &br);
+    // (the output image is shown upside down under OriginLowerLeft: its row 0 is the bottom of the TV)
+    DkImageRect ts = {0, 0, 0, 400, 240, 1}, td = {(u32)tr.x, (u32)(FB_H - tr.y - tr.h), 0, (u32)tr.w, (u32)tr.h, 1};
+    DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {(u32)br.x, (u32)(FB_H - br.y - br.h), 0, (u32)br.w, (u32)br.h, 1};
     dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
-    dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
+    if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
+    if (g_menu_open) {
+        DkImageView pv;
+        dkImageViewDefaults(&pv, &g_panel_img);
+        const u32* px = port_menu_panel();
+        if (px) {   // rows bottom to top, like the screens (the output is shown upside down)
+            u32* dst = (u32*)dkMemBlockGetCpuAddr(g_panel_mem);
+            for (u32 y = 0; y < PANEL_H; y++) memcpy(dst + y * PANEL_W, px + (PANEL_H - 1 - y) * PANEL_W, PANEL_W * 4);
+            DkCopyBuf src = {dkMemBlockGetGpuAddr(g_panel_mem), 0, 0};
+            DkImageRect r = {0, 0, 0, PANEL_W, PANEL_H, 1};
+            dkCmdBufCopyBufferToImage(g_cmd, &src, &pv, &r, 0);
+        }
+        DkImageRect ps = {0, 0, 0, PANEL_W, PANEL_H, 1}, pd = {(FB_W - PANEL_W) / 2, (FB_H - PANEL_H) / 2, 0, PANEL_W, PANEL_H, 1};
+        dkCmdBufBlitImage(g_cmd, &pv, &ps, &fbv, &pd, 0, 0);
+    }
     // Submit and present, then wait for this list alone, outside the queue lock: waiting for the
     // whole queue under the lock made the game thread stop until the GPU was idle (test 6c).
     DkFence done;
@@ -317,19 +359,7 @@ static unsigned long long g_start_ns;
 static void input_poll(void) {
     padUpdate(&g_pad);
     u64 k = padGetButtons(&g_pad);
-    u32 b = 0;
-    if (k & HidNpadButton_A) b |= 1 << 0;
-    if (k & HidNpadButton_B) b |= 1 << 1;
-    if (k & HidNpadButton_Minus) b |= 1 << 2;   // SELECT
-    if (k & HidNpadButton_Plus) b |= 1 << 3;    // START
-    if (k & HidNpadButton_Right) b |= 1 << 4;
-    if (k & HidNpadButton_Left) b |= 1 << 5;
-    if (k & HidNpadButton_Up) b |= 1 << 6;
-    if (k & HidNpadButton_Down) b |= 1 << 7;
-    if (k & HidNpadButton_R) b |= 1 << 8;
-    if (k & HidNpadButton_L) b |= 1 << 9;
-    if (k & HidNpadButton_X) b |= 1 << 10;
-    if (k & HidNpadButton_Y) b |= 1 << 11;
+    u32 b = port_menu_input(k);   // the port menu's button mapping (0 while the menu is open)
     // ZL + ZR + minus held for a second: capture the next frame for the reference renderer
     {
         static unsigned long long held_since;
@@ -360,14 +390,18 @@ static void input_poll(void) {
     last_b = b;
     msr_buttons = b;
     HidAnalogStickState s = padGetStickPos(&g_pad, 0);
-    msr_circle_x = (s16)(s.x * 156 / 32767);
-    msr_circle_y = (s16)(s.y * 156 / 32767);
-    // touch screen (handheld): the bottom screen is drawn at (960, 240), 1:1
+    msr_circle_x = g_menu_open ? 0 : (s16)(s.x * 156 / 32767);
+    msr_circle_y = g_menu_open ? 0 : (s16)(s.y * 156 / 32767);
+    // touch screen (handheld): wherever the layout puts the bottom screen
     HidTouchScreenState ts = {0};
     msr_touch_down = 0;
-    if (hidGetTouchScreenStates(&ts, 1) && ts.count > 0) {
-        int x = (int)ts.touches[0].x - 960, y = (int)ts.touches[0].y - 240;
-        if (x >= 0 && x < 320 && y >= 0 && y < 240) { msr_touch_down = 1; msr_touch_x = (u16)x; msr_touch_y = (u16)y; }
+    Rect tr, br;
+    port_menu_layout(&tr, &br);
+    if (!g_menu_open && br.w && hidGetTouchScreenStates(&ts, 1) && ts.count > 0) {
+        int x = ((int)ts.touches[0].x - br.x) * 320 / br.w, y = ((int)ts.touches[0].y - br.y) * 240 / br.h;
+        if ((int)ts.touches[0].x >= br.x && (int)ts.touches[0].y >= br.y && x < 320 && y < 240) {
+            msr_touch_down = 1; msr_touch_x = (u16)x; msr_touch_y = (u16)y;
+        }
     }
 }
 
@@ -387,13 +421,14 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 10 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 11 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
     msr_time_limit_ns = ~0ull;
     msr_svc_limit = ~0u;
 
+    port_menu_init(DIR "/settings.ini");
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
     hidInitializeTouchScreen();

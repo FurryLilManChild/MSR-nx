@@ -11,7 +11,7 @@ HERE=$(dirname "$(realpath "$0")")
 COMMIT=5a5afc2bae8b55409ab36ba45be63fcb73f68993
 SRC=$OUT/uam-src
 if [ ! -d "$SRC" ]; then git clone -q https://github.com/devkitPro/uam.git "$SRC"; fi
-git -C "$SRC" checkout -q $COMMIT
+git -C "$SRC" checkout -q -f $COMMIT
 cp "$HERE/uam_iface.cpp" "$SRC/source/uam_iface.cpp"
 [ -d "$SRC/build" ] || meson setup "$SRC/build" "$SRC" > /dev/null
 ninja -C "$SRC/build" > /dev/null

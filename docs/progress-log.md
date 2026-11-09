@@ -1,5 +1,22 @@
 # Progress log (newest first)
 
+## 2026-11-09 (afternoon): test 10 results, test 11 (vertex compiles, port menu)
+
+- Test 10 (docked): the four pack configurations compiled on the Switch drew identically to the
+  pack's; 20 shaders compiled in play at about 0.9 s each; the general shader was never used; 29.5
+  to 30 pictures per second throughout except 231 to 236 s (about 21), when three new vertex
+  shaders ran on the interpreter (462 draws).
+- Test 11: runtime/gpu/vsgen.c is pica2glsl.py in C (tools/tests/vsgen_test.sh: identical output on
+  all 51 dumped configurations), so vertex shaders missing from the pack are compiled on the Switch
+  too (the interpreter draws meanwhile). Two compile threads were not done: uam's front end is
+  shared global state (glsl_frontend_init/exit), and on the host the front end, not the optimizer,
+  is most of the time (opt levels 0 to 3 all about 120 ms).
+- Port menu (runtime/switch/port_menu.c): hold minus, game paused (os/sched.c pause point, clock
+  without the paused time), screen layout (top large with bottom small, side by side, stacked, top
+  only), CPU clock (stock 1020 or boost 1785 MHz), mapping of the 3DS A, B, X, Y, L, R, Start and
+  Select to Switch buttons; saved to sdmc:/switch/msr/settings.ini. A minus tap still reaches the
+  game as Select. Touch follows the layout. Pack: 128 fragment configurations, 156 shaders.
+
 ## 2026-11-09 (midday): test 9, shaders compiled on the Switch
 
 - Test 9: no white-out in a new area, but the start-up self-test answered the question: the general
