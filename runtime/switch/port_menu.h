@@ -3,7 +3,7 @@
 #pragma once
 #include <switch.h>
 
-enum { LAYOUT_BIG_SMALL, LAYOUT_SIDE, LAYOUT_STACKED, LAYOUT_TOP_ONLY, LAYOUT_COUNT };
+enum { LAYOUT_BIG_SMALL, LAYOUT_SIDE, LAYOUT_STACKED, LAYOUT_TOP_ONLY, LAYOUT_COUNT };   // TOP_ONLY: single-screen mode
 enum { CLOCK_STOCK, CLOCK_BOOST, CLOCK_COUNT };
 // the 3DS buttons a Switch button can be given to (bit order of msr_buttons)
 enum { B3_A, B3_B, B3_SELECT, B3_START, B3_R = 8, B3_L, B3_X, B3_Y };
@@ -18,6 +18,7 @@ typedef struct {
 
 extern PortSettings g_set;
 extern int g_menu_open;
+extern int g_map_view;   // single-screen mode (top screen only): the bottom screen shown instead, a minus tap toggles it
 
 void port_menu_init(const char* settings_path);
 // Feeds the Switch buttons (held) each frame. Returns the 3DS button bits for the game (0 while

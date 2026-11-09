@@ -169,6 +169,20 @@ static void display_init(void) {
     g_queue = dkQueueCreate(&qm);
 }
 
+// The game's bottom-screen HUD is up (not a menu, map screen or cutscene): the light blue frame line
+// under the missile count at y 40, dark just above it. Read from the last bottom-screen picture.
+static int hud_on_bottom(void) {
+    const u32* b = g_upload + 400 * 240;
+    int ok = 0;
+    for (int x = 90; x <= 140; x += 25) {
+        u32 line = b[(239 - 40) * 320 + x], above = b[(239 - 37) * 320 + x];
+        int r = line & 0xFF, g = (line >> 8) & 0xFF, bl = (line >> 16) & 0xFF;
+        int ab = (above >> 16) & 0xFF;
+        if (bl > 150 && g > 100 && r < 120 && ab < 80) ok++;
+    }
+    return ok == 3;
+}
+
 // An LCD framebuffer is 240 pixels per column, columns left to right, each column bottom to top.
 static void convert_screen(int screen, u32* out, int flip) {
     MsrFramebuffer* f = &msr_fb[screen];
@@ -250,8 +264,23 @@ static void present(void) {
     // (the output image is shown upside down under OriginLowerLeft: its row 0 is the bottom of the TV)
     DkImageRect ts = {0, 0, 0, 400, 240, 1}, td = {(u32)tr.x, (u32)(FB_H - tr.y - tr.h), 0, (u32)tr.w, (u32)tr.h, 1};
     DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {(u32)br.x, (u32)(FB_H - br.y - br.h), 0, (u32)br.w, (u32)br.h, 1};
-    dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
+    if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
+    if (g_set.layout == LAYOUT_TOP_ONLY && !g_map_view && hud_on_bottom()) {
+        // single-screen mode: the bottom screen's readouts, cut out of it and drawn at 2x on the top
+        // one (energy, missiles, Aeion gauge and the ability cross; the selected ability; the
+        // Metroid DNA and Metroids left). Bottom-screen coordinates, rows counted from the top.
+        static const struct { int sx, sy, w, h, dx, dy; } k_hud[3] = {
+            {0, 0, 160, 60, 48, 8},              // top left
+            {250, 10, 70, 70, 1240 - 8 - 140, 8},   // top right
+            {60, 212, 185, 28, 48, 720 - 8 - 56},   // bottom left
+        };
+        for (int k = 0; k < 3; k++) {
+            DkImageRect hs = {(u32)k_hud[k].sx, (u32)(240 - k_hud[k].sy - k_hud[k].h), 0, (u32)k_hud[k].w, (u32)k_hud[k].h, 1};
+            DkImageRect hd = {(u32)k_hud[k].dx, (u32)(FB_H - k_hud[k].dy - 2 * k_hud[k].h), 0, (u32)(2 * k_hud[k].w), (u32)(2 * k_hud[k].h), 1};
+            dkCmdBufBlitImage(g_cmd, &sv[1], &hs, &fbv, &hd, 0, 0);
+        }
+    }
     if (g_set.show_fps) {   // pictures the game showed on the top screen in the last half second or so
         static unsigned long long t0;
         static unsigned s0;
@@ -274,7 +303,7 @@ static void present(void) {
             DkImageRect r = {0, 0, 0, FPS_W, FPS_H, 1};
             dkCmdBufCopyBufferToImage(g_cmd, &src, &fv, &r, 0);
         }
-        DkImageRect fs = {0, 0, 0, FPS_W, FPS_H, 1}, fd = {8, FB_H - 8 - FPS_H, 0, FPS_W, FPS_H, 1};   // top left
+        DkImageRect fs = {0, 0, 0, FPS_W, FPS_H, 1}, fd = {FB_W - 8 - FPS_W, 8, 0, FPS_W, FPS_H, 1};   // bottom right
         dkCmdBufBlitImage(g_cmd, &fv, &fs, &fbv, &fd, 0, 0);
     }
     if (g_menu_open) {

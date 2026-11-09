@@ -10,13 +10,14 @@
 
 PortSettings g_set;
 int g_menu_open;
+int g_map_view;
 static char g_path[256];
 static int g_row, g_wait_bind = -1, g_dirty = 1;
 static u32 g_panel[PANEL_W * PANEL_H];
 
 extern volatile int sched_pause_request;   // os/sched.c holds the game at its next switch while set
 
-static const char* k_layout_names[LAYOUT_COUNT] = {"Top large, bottom small", "Side by side", "Stacked", "Top screen only"};
+static const char* k_layout_names[LAYOUT_COUNT] = {"Top large, bottom small", "Side by side", "Stacked", "Single screen"};
 static const char* k_clock_names[CLOCK_COUNT] = {"Stock (1020 MHz)", "Boost (1785 MHz)"};
 static const char* k_bind_names[NBIND] = {"3DS A", "3DS B", "3DS X", "3DS Y", "3DS L", "3DS R", "3DS Start", "3DS Select"};
 static const int k_bind_bits[NBIND] = {B3_A, B3_B, B3_X, B3_Y, B3_L, B3_R, B3_START, B3_SELECT};
@@ -206,7 +207,11 @@ u32 port_menu_input(u64 held) {
             return 0;
         }
     } else {
-        if (minus_since && !minus_used && now - minus_since < 500000000ull) select_until = now + 100000000ull;
+        if (minus_since && !minus_used && now - minus_since < 500000000ull) {
+            // single-screen mode: the tap shows or hides the bottom screen (map); otherwise Select
+            if (g_set.layout == LAYOUT_TOP_ONLY) g_map_view = !g_map_view;
+            else select_until = now + 100000000ull;
+        }
         minus_since = 0;
         minus_used = 0;
     }
@@ -230,7 +235,10 @@ void port_menu_layout(Rect* t, Rect* b) {
     case LAYOUT_BIG_SMALL: *t = (Rect){0, 72, 960, 576}; *b = (Rect){960, 240, 320, 240}; break;   // 2.4x and 1x
     case LAYOUT_SIDE: *t = (Rect){0, 147, 711, 427}; *b = (Rect){711, 147, 569, 427}; break;       // both 1.78x
     case LAYOUT_STACKED: *t = (Rect){340, 0, 600, 360}; *b = (Rect){400, 360, 480, 360}; break;    // both 1.5x
-    case LAYOUT_TOP_ONLY: *t = (Rect){40, 0, 1200, 720}; *b = (Rect){0, 0, 0, 0}; break;           // 3x
+    case LAYOUT_TOP_ONLY:   // 3x, the top screen or (map view) the bottom one
+        if (g_map_view) { *t = (Rect){0, 0, 0, 0}; *b = (Rect){160, 0, 960, 720}; }
+        else { *t = (Rect){40, 0, 1200, 720}; *b = (Rect){0, 0, 0, 0}; }
+        break;
     }
 }
 
