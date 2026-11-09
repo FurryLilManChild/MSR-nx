@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-09 (evening): test 12 results, test 13
+
+- Run013 (handheld): Fewer waits recorded about 62% of the barriers Safe did (3952 of 6384) with
+  no visible frame rate change. Raising the GPU to 768 MHz with sys-clk made the game much smoother
+  for Mark; the main thread's GPU wait fell from about 2.5 s to about 0.9 s per 5 s. The GPU clock
+  is the handheld limit; the CPU clock barely matters.
+- Test 13: GPU clock setting (system default, 460, 614, 768 MHz; reapplied after docking changes,
+  system clocks restored at exit), single-screen HUD drawn with blending (dark backgrounds
+  see-through, bright text solid), and in single screen a minus or plus tap sends Start and shows
+  the map, another tap goes back.
+
 ## 2026-11-09 (late afternoon): tests 11/11b results, test 12 (single screen, GPU sync test)
 
 - Runs 011/012 (handheld, stock): menu, clock switch, pause and settings all worked; 26 shaders
