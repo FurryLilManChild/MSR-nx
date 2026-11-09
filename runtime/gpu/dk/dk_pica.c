@@ -743,39 +743,32 @@ static unsigned g_vs_hits, g_vs_misses;
 static int g_force_vs_interp, g_force_fs_general;
 // Comparison switches for tests: run every draw on the interpreter vertex shader and/or the general
 // fragment shader, as test builds 1 and 2 did.
-void dkr_force_general(int vs, int fs) { g_force_vs_interp = vs; g_force_fs_general = fs; }
+static volatile unsigned g_force_version;
+void dkr_force_general(int vs, int fs) { g_force_vs_interp = vs; g_force_fs_general = fs; g_force_version++; }
 
-void dkr_load_pack(const char* pack_path, const char* new_path, const char* fs_new_path) {
+// The pack, from memory (built into msr.nro). new_path and fs_new_path collect missing configurations.
+void dkr_load_pack(const u8* data, size_t size, const char* new_path, const char* fs_new_path) {
     snprintf(g_new_path, sizeof g_new_path, "%s", new_path);
     snprintf(g_fs_new_path, sizeof g_fs_new_path, "%s", fs_new_path);
-    FILE* f = fopen(pack_path, "rb");
-    if (!f) { msr_receipt("gpu: no shader pack at %s; every vertex shader runs on the interpreter", pack_path); return; }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    u32 hdr[4];
-    if (size < 16 || fread(hdr, 4, 4, f) != 4 || hdr[0] != 0x5652534Du || hdr[1] != 0x314B5053u) {
-        msr_receipt("gpu: %s is not a shader pack", pack_path);
-        fclose(f);
+    if (!data || size < 16 || memcmp(data, "MSRVSPK1", 8)) {
+        msr_receipt("gpu: no shader pack in this build; every draw uses the general shaders");
         return;
     }
-    u32 n = hdr[2];
+    u32 n;
+    memcpy(&n, data + 8, 4);
+    if (16 + (size_t)n * sizeof(PackEntry) > size) { msr_receipt("gpu: shader pack is cut short"); return; }
     g_pack = (PackEntry*)malloc(n * sizeof *g_pack);
-    if (fread(g_pack, sizeof *g_pack, n, f) != n) { msr_receipt("gpu: shader pack is cut short"); free(g_pack); g_pack = 0; fclose(f); return; }
+    memcpy(g_pack, data + 16, n * sizeof *g_pack);
     u32 code_size = (u32)((size + DK_SHADER_CODE_UNUSABLE_SIZE + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1));
     DkMemBlockMaker mm;
     dkMemBlockMakerDefaults(&mm, g_dev, code_size);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
     g_pack_code = dkMemBlockCreate(&mm);
-    u8* cpu = (u8*)dkMemBlockGetCpuAddr(g_pack_code);
-    fseek(f, 0, SEEK_SET);
-    size_t got = fread(cpu, 1, (size_t)size, f);
-    fclose(f);
-    if (got != (size_t)size) { msr_receipt("gpu: shader pack read failed"); free(g_pack); g_pack = 0; return; }
+    memcpy(dkMemBlockGetCpuAddr(g_pack_code), data, size);
     g_pack_sh = (DkShader*)calloc(n, sizeof *g_pack_sh);
     g_pack_ready = (u8*)calloc(n, 1);
     g_pack_n = n;
-    msr_receipt("gpu: shader pack with %u shaders (%ld bytes)", n, size);
+    msr_receipt("gpu: shader pack with %u shaders (%u bytes)", n, (unsigned)size);
 }
 
 // Finds a key in the pack and prepares its shader the first time; null when it is not there.
@@ -807,7 +800,9 @@ static int first_miss(u64 key) {
 static const DkShader* vs_select(void) {
     static u64 last_key;
     static const DkShader* last = 0;
+    static unsigned seen_version;
     u64 key = pica_vs_key();
+    if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
     if (last && key == last_key) { if (last == &g_vsh) g_vs_misses++; else g_vs_hits++; return last; }
     last_key = key;
     const DkShader* sh = g_force_vs_interp ? 0 : pack_find(key);
@@ -826,7 +821,9 @@ static unsigned g_fs_hits, g_fs_misses;
 static const DkShader* fs_select(void) {
     static u64 last_key;
     static const DkShader* last = 0;
+    static unsigned seen_version;
     u64 key = pica_fs_key();
+    if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
     if (last && key == last_key) { if (last == &g_fsh) g_fs_misses++; else g_fs_hits++; return last; }
     last_key = key;
     const DkShader* sh = g_force_fs_general ? 0 : pack_find(key);

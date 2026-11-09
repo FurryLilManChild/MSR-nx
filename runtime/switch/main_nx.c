@@ -136,7 +136,7 @@ static void display_init(void) {
 }
 
 // An LCD framebuffer is 240 pixels per column, columns left to right, each column bottom to top.
-static void convert_screen(int screen, u32* out) {
+static void convert_screen(int screen, u32* out, int flip) {
     MsrFramebuffer* f = &msr_fb[screen];
     u32 W = screen ? 320 : 400, H = 240, fmt = f->format & 7;
     if (!f->left) { memset(out, 0, W * H * 4); return; }
@@ -160,7 +160,7 @@ static void convert_screen(int screen, u32* out) {
             // deko3d tells the compositor to flip the whole window vertically (HAL_TRANSFORM_FLIP_V,
             // deko3d source/dk_swapchain.cpp). Our 2D-engine blits copy rows in memory order, so
             // the picture has to be stored upside down to come out the right way up.
-            out[(H - 1 - y) * W + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
+            out[(flip ? H - 1 - y : y) * W + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
         }
     }
 }
@@ -174,8 +174,8 @@ static void present(void) {
     if (msr_fb[0].swaps == seen[0] && msr_fb[1].swaps == seen[1]) return;
     seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
     MSR_PERF_BEGIN(PERF_PRESENT);
-    convert_screen(0, g_upload);
-    convert_screen(1, g_upload + 400 * 240);
+    convert_screen(0, g_upload, 1);
+    convert_screen(1, g_upload + 400 * 240, 1);
     mutexLock(&g_qlock);
     int slot = dkQueueAcquireImage(g_queue, g_swap);
     mutexUnlock(&g_qlock);
@@ -252,6 +252,69 @@ static void* audio_thread(void* arg) {
 // ---- input ------------------------------------------------------------------------------------------
 
 static PadState g_pad;
+static char g_run_dir[128];
+// The shader pack, built into msr.nro by tools/switch/nxbuild.sh when the build has one.
+extern const u8 msr_pack_data[] __attribute__((weak));
+extern const u8 msr_pack_end[] __attribute__((weak));
+
+// ---- the comparison cycle ---------------------------------------------------------------------------
+// Test builds switch the renderer's shader choice every 20 seconds by themselves, so one launch
+// measures and pictures every combination: no files to move between runs.
+typedef struct { int vs_interp, fs_general; const char* name; } Mode;
+static const Mode k_modes[] = {
+    {0, 0, "translated vertex shaders, specialized fragment shaders"},
+    {1, 0, "interpreter vertex shader, specialized fragment shaders"},
+    {0, 1, "translated vertex shaders, general fragment shader"},
+    {1, 1, "interpreter vertex shader, general fragment shader (as test 2)"},
+};
+#define MODE_SECONDS 20
+
+int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
+static u32 g_shot_buf[400 * 240];
+static u8 g_shot_rgb[400 * 240 * 3];
+static void convert_screen(int screen, u32* out, int flip);
+// Both screens as the game drew them, straight from its framebuffers.
+static void save_shots(const char* tag) {
+    for (int sc = 0; sc < 2; sc++) {
+        u32 W = sc ? 320 : 400;
+        convert_screen(sc, g_shot_buf, 0);
+        for (u32 i = 0; i < W * 240; i++) {
+            g_shot_rgb[i * 3] = g_shot_buf[i] & 0xFF;
+            g_shot_rgb[i * 3 + 1] = (g_shot_buf[i] >> 8) & 0xFF;
+            g_shot_rgb[i * 3 + 2] = (g_shot_buf[i] >> 16) & 0xFF;
+        }
+        char path[300];
+        snprintf(path, sizeof path, "%s/%s_%s.png", g_run_dir, tag, sc ? "bottom" : "top");
+        msr_write_png(path, g_shot_rgb, W, 240);
+    }
+    msr_receipt("  pictures saved: %s_top.png, %s_bottom.png", tag, tag);
+}
+
+// Clock speeds as the system has them now (sys-clk changes included).
+static void clocks(u32* cpu, u32* gpu, u32* mem) {
+    *cpu = *gpu = *mem = 0;
+    if (hosversionAtLeast(8, 0, 0)) {
+        static int ok = -1;
+        if (ok < 0) ok = R_SUCCEEDED(clkrstInitialize());
+        if (!ok) return;
+        PcvModuleId ids[3] = {PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC};
+        u32* outs[3] = {cpu, gpu, mem};
+        for (int k = 0; k < 3; k++) {
+            ClkrstSession s;
+            if (R_SUCCEEDED(clkrstOpenSession(&s, ids[k], 3))) {
+                clkrstGetClockRate(&s, outs[k]);
+                clkrstCloseSession(&s);
+            }
+        }
+    } else {
+        static int ok = -1;
+        if (ok < 0) ok = R_SUCCEEDED(pcvInitialize());
+        if (!ok) return;
+        pcvGetClockRate(PcvModule_CpuBus, cpu);
+        pcvGetClockRate(PcvModule_GPU, gpu);
+        pcvGetClockRate(PcvModule_EMC, mem);
+    }
+}
 static unsigned long long g_start_ns;
 
 static void input_poll(void) {
@@ -300,9 +363,15 @@ int main(int argc, char** argv) {
     mkdir(DIR, 0777);
     struct stat st;
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log
-    msr_log_open(DIR);
+    // every launch gets its own folder for the receipt, pictures and anything else it writes
+    mkdir(DIR "/switchlogs", 0777);
+    for (int n = 1; n < 1000; n++) {
+        snprintf(g_run_dir, sizeof g_run_dir, DIR "/switchlogs/run%03d", n);
+        if (mkdir(g_run_dir, 0777) == 0) break;
+    }
+    msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 4 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 4b (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -316,15 +385,11 @@ int main(int argc, char** argv) {
     display_init();
     if (!cpu_render) {
         dkr_init(g_dev, g_queue, &g_qlock);
-        void dkr_load_pack(const char* pack_path, const char* new_path, const char* fs_new_path);
-        dkr_load_pack(DIR "/shaders.pack", DIR "/vs_new.bin", DIR "/fs_new.bin");
-        // empty files that switch the pack off, for comparing pictures: vsinterp, fsgeneral
-        void dkr_force_general(int vs, int fs);
-        FILE* t1 = fopen(DIR "/vsinterp", "rb");
-        FILE* t2 = fopen(DIR "/fsgeneral", "rb");
-        dkr_force_general(t1 != 0, t2 != 0);
-        if (t1) { fclose(t1); msr_receipt("gpu: vsinterp file found: every vertex shader runs on the interpreter"); }
-        if (t2) { fclose(t2); msr_receipt("gpu: fsgeneral file found: every draw uses the general fragment shader"); }
+        void dkr_load_pack(const u8* data, size_t size, const char* new_path, const char* fs_new_path);
+        char vs_new[300], fs_new[300];
+        snprintf(vs_new, sizeof vs_new, "%s/vs_new.bin", g_run_dir);
+        snprintf(fs_new, sizeof fs_new, "%s/fs_new.bin", g_run_dir);
+        dkr_load_pack(msr_pack_data, msr_pack_data ? (size_t)(msr_pack_end - msr_pack_data) : 0, vs_new, fs_new);
         g_gpu_render = 1;
     }
     if (R_SUCCEEDED(audoutInitialize()) && R_SUCCEEDED(audoutStartAudioOut())) {
@@ -351,6 +416,14 @@ int main(int argc, char** argv) {
     g_start_ns = msr_now_ns();
     unsigned long long next_report = g_start_ns + 5000000000ull;
     unsigned last_swaps = 0;
+    int mode = 0, reports = 0;
+    unsigned long long shot_at = g_start_ns + 5000000000ull;
+    void dkr_force_general(int vs, int fs);
+    if (g_gpu_render) {
+        msr_receipt("mode 1 of %d: %s (modes change every %d s)", (int)(sizeof k_modes / sizeof k_modes[0]),
+                    k_modes[0].name, MODE_SECONDS);
+        dkr_force_general(0, 0);
+    }
     while (appletMainLoop()) {
         input_poll();
         present();
@@ -359,8 +432,11 @@ int main(int argc, char** argv) {
             // the speed meter: the real 3DS shows up to 60 pictures a second on the top screen
             double secs = (now - next_report + 5000000000ull) / 1e9;
             unsigned sw = msr_fb[0].swaps;
-            msr_receipt("speed at %.0f s: %.1f top-screen pictures per second", (now - g_start_ns) / 1e9,
-                        (sw - last_swaps) / secs);
+            u32 ccpu, cgpu, cmem;
+            clocks(&ccpu, &cgpu, &cmem);
+            msr_receipt("speed at %.0f s (mode %d): %.1f top-screen pictures per second; clocks CPU %u MHz, GPU %u MHz, memory %u MHz",
+                        (now - g_start_ns) / 1e9, mode + 1, (sw - last_swaps) / secs, ccpu / 1000000, cgpu / 1000000,
+                        cmem / 1000000);
             msr_perf_report(secs);
             if (g_gpu_render) {
                 void dkr_vs_stats(unsigned* hits, unsigned* misses);
@@ -373,6 +449,18 @@ int main(int argc, char** argv) {
             }
             last_swaps = sw;
             next_report = now + 5000000000ull;
+            if (g_gpu_render && ++reports % (MODE_SECONDS / 5) == 0) {
+                mode = (mode + 1) % (int)(sizeof k_modes / sizeof k_modes[0]);
+                dkr_force_general(k_modes[mode].vs_interp, k_modes[mode].fs_general);
+                msr_receipt("mode %d: %s", mode + 1, k_modes[mode].name);
+                shot_at = now + 5000000000ull;
+            }
+        }
+        if (shot_at && now >= shot_at) {
+            char tag[48];
+            snprintf(tag, sizeof tag, "t%03d_mode%d", (int)((now - g_start_ns) / 1000000000ull), mode + 1);
+            save_shots(tag);
+            shot_at = 0;
         }
         if ((padGetButtons(&g_pad) & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R)) ==
             (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R))

@@ -13,8 +13,15 @@ for f in cpu/dispatch.c os/log.c os/mem.c os/svc.c os/kernel.c os/boot.c os/hle_
 done
 echo RUNTIME-OK
 if [ "$1" = "link" ]; then
-  aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test4" nxout/msr.nacp
+  # the shader pack (made from game data, never committed) goes inside msr.nro when there is one
+  PACKOBJ=""
+  if [ -f shaders.pack ]; then
+    printf '.section .rodata.msr_pack,"a"\n.global msr_pack_data\n.global msr_pack_end\n.balign 256\nmsr_pack_data:\n.incbin "/w/shaders.pack"\nmsr_pack_end:\n' > nxout/pack_blob.S
+    aarch64-none-elf-gcc $ARCH -c nxout/pack_blob.S -o nxout/pack_blob.o
+    PACKOBJ=nxout/pack_blob.o
+  fi
+  aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test4b" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi
