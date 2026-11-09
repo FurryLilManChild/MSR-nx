@@ -197,8 +197,30 @@ static u32 vram_version(u32 a, u32 n) {
 }
 
 // A barrier between steps that hand data to each other through memory or images.
+// GPU sync (port menu): 0 Safe, a full barrier with every cache invalidated at each call; 1 Fewer
+// waits, no barrier when nothing was recorded since the last one (back-to-back kernels asked for
+// two); 2 Lean, as 1 without invalidating the L2 cache. g_clean: nothing recorded since a barrier.
+static int g_sync_mode, g_clean;
+static unsigned g_barriers_asked, g_barriers_done;
+#define GPU_WORK() (g_clean = 0)
 static void gpu_barrier(void) {
-    dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_L2Cache);
+    g_barriers_asked++;
+    if (g_sync_mode >= 1 && g_clean) return;
+    g_barriers_done++;
+    u32 inv = DkInvalidateFlags_Image | DkInvalidateFlags_Shader | (g_sync_mode >= 2 ? 0 : DkInvalidateFlags_L2Cache);
+    dkCmdBufBarrier(g_cmd, DkBarrier_Full, inv);
+    g_clean = 1;
+}
+void dkr_set_sync_mode(int m) {
+    static const char* names[3] = {"Safe", "Fewer waits", "Lean"};
+    if (m < 0 || m > 2) m = 0;
+    g_sync_mode = m;
+    g_clean = 0;   // the next barrier is always recorded
+    msr_receipt("gpu: GPU sync set to %s", names[m]);
+}
+void dkr_barrier_stats(unsigned* asked, unsigned* done) {
+    *asked = g_barriers_asked; *done = g_barriers_done;
+    g_barriers_asked = g_barriers_done = 0;
 }
 
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
@@ -235,6 +257,7 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
     DkShader const* sh = &g_k[k];
     dkCmdBufBindShaders(g_cmd, DkStageFlag_Compute, &sh, 1);
     dkCmdBufDispatchCompute(g_cmd, (n + 63) / 64, 1, 1);
+    GPU_WORK();
     gpu_barrier();
 }
 
@@ -245,6 +268,7 @@ static void vram_upload(u32 a, u32 n) {
         u32 off = dyn_alloc((chunk + 3) & ~3u, 256);
         memcpy(g_dyn_cpu + off, g_mem + a, chunk);
         dkCmdBufCopyBuffer(g_cmd, g_dyn_gpu + off, g_vram_gpu + (a - VRAM_BASE), chunk);
+        GPU_WORK();
         a += chunk;
         n -= chunk;
     }
@@ -272,6 +296,7 @@ static void surf_upload(Surf* s) {
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &v, &r, 0);
+    GPU_WORK();
     s->cpu_dirty = 0;
     MSR_PERF_END(PERF_SURF_UPLOAD);
 }
@@ -287,6 +312,7 @@ static void surf_readback(Surf* s) {
     DkCopyBuf cb = {g_rb_gpu, 0, 0};
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
     dkCmdBufCopyImageToBuffer(g_cmd, &v, &r, &cb, 0);
+    GPU_WORK();
     flush(1);
     armDCacheFlush(g_rb_cpu, bytes);   // drop any stale lines before reading what the GPU wrote
     const u8* src = g_rb_cpu;
@@ -576,6 +602,7 @@ static DkImage* tex_get(u32 paddr, u32 fmt, u32 w, u32 h) {
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, w, h, 1};
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &iv, &r, 0);
+    GPU_WORK();
     return &hit->img;
 }
 
@@ -589,6 +616,7 @@ static void lut_update(void) {
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, 256, 24, 1};
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &iv, &r, 0);
+    GPU_WORK();
 }
 
 // ---- submission ----------------------------------------------------------------------------------
@@ -808,11 +836,13 @@ static int dk_draw(int indexed) {
         if (cs->clear_pending) {
             u32 v = cs->clear_value;
             dkCmdBufClearColorFloat(g_cmd, 0, DkColorMask_RGBA, (v >> 24) / 255.f, ((v >> 16) & 0xFF) / 255.f, ((v >> 8) & 0xFF) / 255.f, (v & 0xFF) / 255.f);
+            GPU_WORK();
             cs->clear_pending = 0;
         }
         if (ds && ds->clear_pending) {
             u32 v = ds->clear_value;
             dkCmdBufClearDepthStencil(g_cmd, true, (v & 0xFFFFFF) / 16777215.0f, 0xFF, (u8)(v >> 24));
+            GPU_WORK();
             ds->clear_pending = 0;
         }
     }
@@ -923,7 +953,9 @@ static int dk_draw(int indexed) {
     if (indexed) {
         dkCmdBufBindIdxBuffer(g_cmd, DkIdxFormat_Uint16, g_dyn_gpu + ioff);
         dkCmdBufDrawIndexed(g_cmd, prim, n, 1, 0, 0, 0);
+        GPU_WORK();
     } else dkCmdBufDraw(g_cmd, prim, n, 1, 0, 0);
+    GPU_WORK();
     if (r[0x113] && ((dm >> 8) & 0xF)) cs->gpu_dirty = 1;
     if (++g_draws_since_flush >= 256) flush(0);
     return 1;
@@ -1034,6 +1066,7 @@ static int dk_gx(int op, const u32* d) {
             store_range(src, n);
             vram_will_write(dst, n);
             dkCmdBufCopyBuffer(g_cmd, g_vram_gpu + (src - VRAM_BASE), g_vram_gpu + (dst - VRAM_BASE), n);
+            GPU_WORK();
             gpu_barrier();
             vram_touch(dst, n);
             return 1;
@@ -1068,6 +1101,7 @@ int dkr_record_screen(DkCmdBuf cmd, int screen, u32 addr, u32 stride, u32 format
     dkCmdBufBindStorageBuffers(cmd, DkStage_Compute, 0, sb, 2);
     DkShader const* sh = &g_k[K_SCREEN];
     dkCmdBufBindShaders(cmd, DkStageFlag_Compute, &sh, 1);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader);   // the game's VRAM writes first
     dkCmdBufDispatchCompute(cmd, (W * 240 + 63) / 64, 1, 1);
     dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_L2Cache);
     return 1;
@@ -1613,6 +1647,7 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
         DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
         DkImageRect r = {0, 0, 0, S, S, 1};
         dkCmdBufCopyBufferToImage(g_cmd, &cb, &v, &r, 0);
+        GPU_WORK();
         u32 lo = dyn_alloc(256 * 24 * 8, 256);
         float* l = (float*)(g_dyn_cpu + lo);
         for (u32 tb = 0; tb < 24; tb++)

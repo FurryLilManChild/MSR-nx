@@ -493,7 +493,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 11c (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 12 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -576,6 +576,11 @@ int main(int argc, char** argv) {
                 unsigned cc, ca, cm, cp;
                 dkr_compile_stats(&cc, &ca, &cm, &cp);
                 if (cc || cp) msr_receipt("  compiled on the Switch so far: %u (%u ms each on average, longest %u ms), %u in progress", cc, ca, cm, cp);
+                void dkr_barrier_stats(unsigned* asked, unsigned* done);
+                unsigned ba, bd;
+                dkr_barrier_stats(&ba, &bd);
+                msr_receipt("  GPU barriers: %u recorded of %u asked (GPU sync %s)", bd, ba,
+                            g_set.sync == 0 ? "Safe" : g_set.sync == 1 ? "Fewer waits" : "Lean");
                 unsigned dkr_ez_stats(void);
                 msr_receipt("  early depth: %u draws", dkr_ez_stats());
                 void dkr_vram_stats(unsigned* out);

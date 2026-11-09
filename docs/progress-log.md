@@ -1,5 +1,17 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late afternoon): tests 11/11b results, test 12 (single screen, GPU sync test)
+
+- Runs 011/012 (handheld, stock): menu, clock switch, pause and settings all worked; 26 shaders
+  compiled in play (one vertex shader, 1.9 s, interpreter meanwhile); general shader unused. Mostly
+  28.5 to 30; two GPU-bound dips to about 20 (199 to 204 s, 269 to 274 s) with the main thread
+  waiting 1.6 to 2.4 s of every 5 for the GPU and nothing compiling.
+- Test 12: single-screen layout (bottom-screen readouts cut out and drawn at 2x on the top screen
+  while the game's HUD frame is visible; minus tap toggles the map), frame counter, and a port menu
+  "GPU sync (test)" row: Safe (every barrier, all caches), Fewer waits (no barrier when nothing was
+  recorded since the last), Lean (also no L2 invalidate). Barrier counts go to the receipt. Pack:
+  152 fragment configurations, 181 shaders.
+
 ## 2026-11-09 (afternoon): test 10 results, test 11 (vertex compiles, port menu)
 
 - Test 10 (docked): the four pack configurations compiled on the Switch drew identically to the

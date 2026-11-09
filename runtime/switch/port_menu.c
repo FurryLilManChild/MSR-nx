@@ -8,6 +8,8 @@
 #include "port_menu.h"
 #include "msr_log.h"
 
+void dkr_set_sync_mode(int m);   // gpu/dk/dk_pica.c
+
 PortSettings g_set;
 int g_menu_open;
 int g_map_view;
@@ -37,7 +39,7 @@ static const char* sw_name(u64 b) {
 }
 
 // rows: 0 layout, 1 clock, 2..9 bindings, 10 reset bindings, 11 close
-enum { ROW_LAYOUT, ROW_CLOCK, ROW_FPS, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
+enum { ROW_LAYOUT, ROW_CLOCK, ROW_FPS, ROW_SYNC, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 
 // ---- clocks -----------------------------------------------------------------------------------------
 static int g_clk_ok = -1;
@@ -60,7 +62,7 @@ static void save(void) {
     // written in place: the SD card cannot rename over an existing file (learned on MPH-nx)
     FILE* f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "layout=%d\nclock=%d\nfps=%d\n", g_set.layout, g_set.clock, g_set.show_fps);
+    fprintf(f, "layout=%d\nclock=%d\nfps=%d\nsync=%d\n", g_set.layout, g_set.clock, g_set.show_fps, g_set.sync);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -80,11 +82,13 @@ void port_menu_init(const char* settings_path) {
             if (sscanf(line, "layout=%d", &v) == 1 && v >= 0 && v < LAYOUT_COUNT) g_set.layout = v;
             else if (sscanf(line, "clock=%d", &v) == 1 && v >= 0 && v < CLOCK_COUNT) g_set.clock = v;
             else if (sscanf(line, "fps=%d", &v) == 1) g_set.show_fps = v != 0;
+            else if (sscanf(line, "sync=%d", &v) == 1 && v >= 0 && v < 3) g_set.sync = v;
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
         fclose(f);
         found = 1;
     }
+    dkr_set_sync_mode(g_set.sync);
     msr_receipt("menu: settings %s: layout %s, CPU clock %s", found ? "loaded" : "default", k_layout_names[g_set.layout],
                 k_clock_names[g_set.clock]);
     if (g_set.clock != CLOCK_STOCK) clock_apply();
@@ -130,6 +134,7 @@ static void draw(void) {
         const char* label = "";
         if (r == ROW_LAYOUT) { label = "Screen layout"; snprintf(v, sizeof v, "< %s >", k_layout_names[g_set.layout]); }
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
+        else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync (test)"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r < ROW_RESET) {
             int k = r - ROW_BIND0;
@@ -184,6 +189,7 @@ u32 port_menu_input(u64 held) {
         if (down & (HidNpadButton_Down | HidNpadButton_StickLDown)) { g_row = (g_row + 1) % NROWS; g_dirty = 1; }
         if (down & (HidNpadButton_Up | HidNpadButton_StickLUp)) { g_row = (g_row + NROWS - 1) % NROWS; g_dirty = 1; }
         if (dx && g_row == ROW_LAYOUT) { g_set.layout = (g_set.layout + LAYOUT_COUNT + dx) % LAYOUT_COUNT; g_dirty = 1; }
+        if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }
         if ((dx || (down & HidNpadButton_A)) && g_row == ROW_FPS) { g_set.show_fps = !g_set.show_fps; g_dirty = 1; }
         if (dx && g_row == ROW_CLOCK) { g_set.clock = (g_set.clock + CLOCK_COUNT + dx) % CLOCK_COUNT; clock_apply(); g_dirty = 1; }
         if (down & HidNpadButton_A) {

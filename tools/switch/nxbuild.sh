@@ -30,7 +30,7 @@ if [ "$1" = "link" ]; then
   UAMLIB=""
   if [ -f libuam.a ]; then UAMLIB="libuam.a"; fi
   aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ $UAMLIB -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm -lstdc++
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test11c" nxout/msr.nacp
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test12" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi

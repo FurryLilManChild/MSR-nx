@@ -12,7 +12,8 @@ enum { B3_A, B3_B, B3_SELECT, B3_START, B3_R = 8, B3_L, B3_X, B3_Y };
 typedef struct {
     int layout;
     int clock;
-    int show_fps;      // the frame counter in the top left corner
+    int show_fps;      // the frame counter
+    int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select
 } PortSettings;
 
