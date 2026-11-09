@@ -217,6 +217,10 @@ static void present(void) {
     DkImageView fbv, sv[2];
     dkImageViewDefaults(&fbv, &g_fb[slot]);
     dkCmdBufBindRenderTarget(g_cmd, &fbv, NULL);
+    // the whole output: the scissor is GPU state the game's draws leave behind (test 11's clear
+    // missed the corners, and the closed menu stayed there)
+    DkScissor fsc = {0, 0, FB_W, FB_H};
+    dkCmdBufSetScissors(g_cmd, 0, &fsc, 1);
     dkCmdBufClearColorFloat(g_cmd, 0, DkColorMask_RGBA, 0, 0, 0, 1);
     for (int k = 0; k < 2; k++) {
         dkImageViewDefaults(&sv[k], &g_scr[k]);
@@ -421,7 +425,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 11 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 11b (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }

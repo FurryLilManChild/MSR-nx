@@ -96,14 +96,15 @@ static void fill(int x, int y, int w, int h, u32 c) {
                 if (i >= 0 && i < PANEL_W) g_panel[j * PANEL_W + i] = c;
 }
 
-// libnx's console font: 256 glyphs of 16x16, one little-endian u16 per row, bit 0 the left pixel.
+// libnx's console font: 256 glyphs of 16x16, one little-endian u16 per row, bit 15 the left pixel
+// (test 11 read bit 0 as the left one and drew every letter mirrored).
 static void text(int x, int y, const char* s, u32 c) {
     const u16* font = (const u16*)consoleGetDefault()->font.gfx;
     for (; *s; s++, x += 16) {
         const u16* g = font + 16 * (u8)*s;
         for (int r = 0; r < 16; r++)
             for (int b = 0; b < 16; b++)
-                if ((g[r] >> b) & 1) {
+                if ((g[r] >> (15 - b)) & 1) {
                     int px = x + b, py = y + r;
                     if (px >= 0 && px < PANEL_W && py >= 0 && py < PANEL_H) g_panel[py * PANEL_W + px] = c;
                 }

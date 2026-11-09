@@ -53,3 +53,7 @@
 - Taking a correlation (local memory only in the general shader, white-out only where it drew) as
   the likely cause: the on-device self-test showed the rewritten shader just as wrong. Put the check
   on the hardware first when a GPU-only fault cannot be reproduced on the PC.
+- libnx's console font rows are little-endian u16 with bit 15 as the LEFT pixel. Check glyph
+  orientation with an asymmetric letter (g, F), never with A (test 11 drew mirrored text).
+- Scissor is queue state the game's draws leave behind: set it before clearing the output in
+  present(), or the clear misses part of the frame (test 11: the closed menu stayed visible).
