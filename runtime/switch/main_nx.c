@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 14 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 15 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -663,6 +663,15 @@ int main(int argc, char** argv) {
                 unsigned cc, ca, cm, cp;
                 dkr_compile_stats(&cc, &ca, &cm, &cp);
                 if (cc || cp) msr_receipt("  compiled on the Switch so far: %u (%u ms each on average, longest %u ms), %u in progress", cc, ca, cm, cp);
+                void dkr_gpu_times(unsigned* draw_ms, unsigned* vram_ms, unsigned* other_ms);
+                unsigned gd, gv, go;
+                dkr_gpu_times(&gd, &gv, &go);
+                msr_receipt("  GPU time: draws %u ms, VRAM work %u ms, elsewhere or idle %u ms", gd, gv, go);
+                extern unsigned eye_runs[2], eye_total[2];
+                static unsigned er0, er1, et0, et1;
+                msr_receipt("  eyes: left %u draws run of %u, right %u run of %u (the frame plan skips the rest)", eye_runs[0] - er0, eye_total[0] - et0,
+                            eye_runs[1] - er1, eye_total[1] - et1);
+                er0 = eye_runs[0]; er1 = eye_runs[1]; et0 = eye_total[0]; et1 = eye_total[1];
                 void dkr_barrier_stats(unsigned* asked, unsigned* done);
                 unsigned ba, bd;
                 dkr_barrier_stats(&ba, &bd);

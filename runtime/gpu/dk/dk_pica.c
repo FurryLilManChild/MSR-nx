@@ -223,10 +223,59 @@ void dkr_barrier_stats(unsigned* asked, unsigned* done) {
     g_barriers_asked = g_barriers_done = 0;
 }
 
+// ---- GPU timers -------------------------------------------------------------------------------
+// The GPU writes its clock into a ring at every change between kinds of work in the game's
+// command lists (draws, VRAM work: kernels and copies) and at the start of each list. The time from
+// one mark to the next goes to the kind of work that ended at it; time up to a list's first mark
+// is the GPU doing something else (the presenter's lists) or nothing. Read back when the GPU has
+// written the marks, reported every 5 seconds.
+enum { TS_NONE, TS_DRAW, TS_VRAM, TS_START, TS_KINDS };
+#define TS_RING 4096
+static DkMemBlock g_ts_mem;
+static u8 g_ts_kind[TS_RING];
+static u32 g_ts_w, g_ts_r;
+static int g_ts_seg;
+static u64 g_ts_ns[TS_KINDS], g_ts_last;
+static void ts_mark(int kind) {
+    if (!g_ts_mem || kind == g_ts_seg) return;
+    if (g_ts_w - g_ts_r >= TS_RING) return;   // the reader is behind: skip marks rather than overwrite
+    u32 i = g_ts_w % TS_RING;
+    u64* e = (u64*)((u8*)dkMemBlockGetCpuAddr(g_ts_mem) + i * 16);
+    e[0] = e[1] = 0;
+    g_ts_kind[i] = (u8)g_ts_seg;   // the segment that ends here
+    dkCmdBufReportCounter(g_cmd, DkCounter_Timestamp, dkMemBlockGetGpuAddr(g_ts_mem) + i * 16);
+    g_ts_w++;
+    g_ts_seg = kind;
+}
+static void ts_collect(void) {
+    if (!g_ts_mem) return;
+    const u8* base = (const u8*)dkMemBlockGetCpuAddr(g_ts_mem);
+    while (g_ts_r != g_ts_w) {
+        u32 i = g_ts_r % TS_RING;
+        u64 t = *(volatile const u64*)(base + i * 16 + 8);
+        if (!t) break;   // not written yet
+        t = dkTimestampToNs(t);   // GPU ticks (as deko3d's own timestamps); the three parts adding up to the
+                                  // report period (5000 ms) in the log is the check of this
+        if (g_ts_last && t > g_ts_last && t - g_ts_last < 1000000000ull) g_ts_ns[g_ts_kind[i]] += t - g_ts_last;
+        g_ts_last = t;
+        g_ts_r++;
+    }
+}
+// GPU milliseconds (per 5 seconds, or whatever the caller's period) in draws, VRAM work, and
+// elsewhere (the presenter's lists, idle), then zeroed.
+void dkr_gpu_times(unsigned* draw_ms, unsigned* vram_ms, unsigned* other_ms) {
+    ts_collect();
+    *draw_ms = (unsigned)(g_ts_ns[TS_DRAW] / 1000000);
+    *vram_ms = (unsigned)(g_ts_ns[TS_VRAM] / 1000000);
+    *other_ms = (unsigned)((g_ts_ns[TS_START] + g_ts_ns[TS_NONE]) / 1000000);
+    memset(g_ts_ns, 0, sizeof g_ts_ns);
+}
+
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
 static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkImage* dst) {
     if (!n) return;
     g_vram_ops[k]++;
+    ts_mark(TS_VRAM);
     gpu_barrier();   // what earlier draws and kernels wrote is visible
     DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1000;   // after the draw uniforms
     dkCmdBufPushConstants(g_cmd, ubo, 64, 0, 64, q);
@@ -263,6 +312,7 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
 
 // The CPU wrote guest VRAM [a, a + n): send it to the GPU's copy, in order with queued work.
 static void vram_upload(u32 a, u32 n) {
+    ts_mark(TS_VRAM);
     while (n) {
         u32 chunk = n > (4u << 20) ? (4u << 20) : n;
         u32 off = dyn_alloc((chunk + 3) & ~3u, 256);
@@ -644,6 +694,7 @@ static void cmd_add_chunk(void) {
 static void cmd_out_of_memory(void* user, DkCmdBuf cmd, size_t need) { (void)user; (void)cmd; (void)need; cmd_add_chunk(); }
 
 static void flush(int wait) {
+    ts_mark(TS_NONE);   // the end of the list's last segment
     mutexLock(g_qlock);
     dkQueueSubmitCommands(g_q, dkCmdBufFinishList(g_cmd));
     dkQueueSignalFence(g_q, &g_last_fence, false);
@@ -661,6 +712,9 @@ static void flush(int wait) {
     g_draws_since_flush = 0;
     g_flushes++;
     g_bound_color = g_bound_depth = 0;   // bindings do not carry over a new command list
+    g_ts_seg = TS_START;
+    ts_mark(TS_NONE);   // the GPU reaching this list: the time since the last one was not the game's
+    ts_collect();
 }
 
 static void dyn_next_segment(void) {
@@ -819,6 +873,7 @@ static int dk_draw(int indexed) {
     }
 
     // ---- phase C: commands
+    ts_mark(TS_DRAW);
     if (g_bound_color != cs || g_bound_depth != ds) {
         DkImageView cv, dv;
         dkImageViewDefaults(&cv, &cs->img);
@@ -1065,6 +1120,7 @@ static int dk_gx(int op, const u32* d) {
             if (src < dst + n && dst < src + n) return 0;
             store_range(src, n);
             vram_will_write(dst, n);
+            ts_mark(TS_VRAM);
             dkCmdBufCopyBuffer(g_cmd, g_vram_gpu + (src - VRAM_BASE), g_vram_gpu + (dst - VRAM_BASE), n);
             GPU_WORK();
             gpu_barrier();
@@ -1558,6 +1614,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_vram = dkMemBlockCreate(&mm);
     g_vram_gpu = dkMemBlockGetGpuAddr(g_vram);
     memset(dkMemBlockGetCpuAddr(g_vram), 0, VRAM_SIZE);
+    dkMemBlockMakerDefaults(&mm, dev, TS_RING * 16);
+    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    g_ts_mem = dkMemBlockCreate(&mm);
 
     dkMemBlockMakerDefaults(&mm, dev, DYN_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;

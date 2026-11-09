@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "frame_plan.h"
+#include "eye_reuse.h"
 #include "capture.h"
 #include <string.h>
 #include "hle.h"
@@ -173,14 +174,28 @@ static void gx_command(u32 entry) {
     gx_execute(id, d);
 }
 
+// A VRAM to VRAM copy outside the game's own commands: right eye reuse making the right eye real.
+static void eye_copy(u32 src, u32 dst, u32 n) {
+    u32 dd[3] = {src, dst, n};
+    if (pica_gx_hook && pica_gx_hook(0, dd)) return;
+    if (pica_sync_hook) pica_sync_hook(src, n);
+    memmove(g_mem + dst, g_mem + src, n);
+    if (pica_invalidate_hook) pica_invalidate_hook(dst, n);
+}
+
+static u64 tmix(u64 h, u32 v) { for (int i = 0; i < 4; i++) { h ^= (v >> (8 * i)) & 0xFF; h *= 0x100000001B3ull; } return h; }
+
 // One GX command (also replayed from a frame capture by the probe).
 void gx_execute(u32 id, u32* d) {
+    { static int set; if (!set) { set = 1; eye_reuse_copier(eye_copy); } }
     if (id < 8) msr_gx_counts[id]++;
     switch (id) {
     case 0x00:  // RequestDma(source, destination, size)
         gx_stat[0]++;
         { u32 rr[2] = {d[0], d[0] + d[2]}, ww[2] = {d[1], d[1] + d[2]};
           fp_op(FP_DMA, ((u64)d[0] << 32) ^ d[1], rr, 1, ww, 1, 1); }   // always runs: the game's own data
+        eye_before_read(d[0], d[0] + d[2]);
+        eye_written(d[1], d[1] + d[2], (d[0] >= 0x1F000000u && d[0] < 0x1F600000u) ? tmix(eye_token_of(d[0], d[0] + d[2]), d[2]) : 0);
         if (!(pica_gx_hook && pica_gx_hook(0, d))) {   // the GPU renderer may do it on its side
             if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
             if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
@@ -200,7 +215,9 @@ void gx_execute(u32 id, u32* d) {
             u32 start = d[b * 3], value = d[b * 3 + 1], end = d[b * 3 + 2];
             if (!start || end <= start) continue;
             { u32 ww[2] = {start, end};
-              if (!fp_op(FP_FILL, ((u64)start << 32) ^ end, 0, 0, ww, 1, 1)) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; } }
+              int run = fp_op(FP_FILL, ((u64)start << 32) ^ end, 0, 0, ww, 1, 1);
+              eye_written(start, end, run ? tmix(tmix(tmix(0xF111u, value), (d[6] >> (16 * b + 8)) & 3), end - start) : 0);
+              if (!run) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; } }
             if (pica_gx_hook) {
                 u32 a[4] = {start, end, value, (d[6] >> (16 * b + 8)) & 3};
                 if (pica_gx_hook(2, a)) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; }
@@ -222,7 +239,11 @@ void gx_execute(u32 id, u32* d) {
             u32 fi = (d[4] >> 8) & 7, fo = (d[4] >> 12) & 7, down = (d[4] >> 24) & 3;
             u32 ow = (d[3] & 0xFFFF) / (down ? 2 : 1), oh = (d[3] >> 16) / (down == 2 ? 2 : 1);
             u32 rr[2] = {d[0], d[0] + (d[2] & 0xFFFF) * (d[2] >> 16) * bpp[fi]}, ww[2] = {d[1], d[1] + ow * oh * bpp[fo]};
-            if (!fp_op(FP_TRANSFER, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[4] << 16), rr, 1, ww, 1, 1)) { gsp_interrupt(IRQ_PPF); break; }
+            eye_note_transfer(d[0], d[1], rr[1] - rr[0]);
+            int run = fp_op(FP_TRANSFER, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[4] << 16), rr, 1, ww, 1, 1);
+            if (run) eye_before_read(rr[0], rr[1]);
+            eye_written(ww[0], ww[1], run ? tmix(tmix(tmix(tmix(eye_token_of(rr[0], rr[1]), d[2]), d[3]), d[4]), 3) : 0);
+            if (!run) { gsp_interrupt(IRQ_PPF); break; }
         }
         if (pica_gx_hook && pica_gx_hook(3, d)) { gsp_interrupt(IRQ_PPF); break; }
         if (pica_sync_hook) pica_sync_hook(d[0], (d[2] & 0xFFFF) * (d[2] >> 16) * 4);
@@ -237,7 +258,10 @@ void gx_execute(u32 id, u32* d) {
             u32 iw = (d[3] & 0xFFFF) * 16, ig = (d[3] >> 16) * 16, ow = (d[4] & 0xFFFF) * 16, og = (d[4] >> 16) * 16;
             u32 in_span = iw ? d[2] + d[2] / iw * ig : d[2], out_span = ow ? d[2] + d[2] / ow * og : d[2];
             u32 rr[2] = {d[0], d[0] + in_span}, ww[2] = {d[1], d[1] + out_span};
-            if (!fp_op(FP_COPY, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[2] << 8), rr, 1, ww, 1, ig == 0 && og == 0)) { gsp_interrupt(IRQ_PPF); break; }
+            int run = fp_op(FP_COPY, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[2] << 8), rr, 1, ww, 1, ig == 0 && og == 0);
+            if (run) eye_before_read(rr[0], rr[1]);
+            eye_written(ww[0], ww[1], run ? tmix(tmix(tmix(tmix(tmix(eye_token_of(rr[0], rr[1]), d[2]), d[3]), d[4]), d[5]), 4) : 0);
+            if (!run) { gsp_interrupt(IRQ_PPF); break; }
             if (pica_gx_hook && pica_gx_hook(4, d)) { gsp_interrupt(IRQ_PPF); break; }
             if (pica_sync_hook) pica_sync_hook(d[0], in_span);
             { MSR_PERF_BEGIN(PERF_TEXCOPY); pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]); MSR_PERF_END(PERF_TEXCOPY); }
@@ -284,6 +308,10 @@ static void gsp_latch_framebuffers(void) {
         u32 e = rec + 4 + 0x1C * (hdr & 1);
         msr_fb[screen].left = rd32(e + 4);
         msr_fb[screen].right = rd32(e + 8);
+        if (screen == 0) {
+            u32 lv = pica_vaddr(msr_fb[0].left), rv = pica_vaddr(msr_fb[0].right);
+            eye_note_framebuffers(lv ? lv : msr_fb[0].left, rv ? rv : msr_fb[0].right);
+        }
         msr_fb[screen].stride = rd32(e + 12);
         msr_fb[screen].format = rd32(e + 16);
         if (msr_fb[screen].swaps++ < 4)
@@ -314,6 +342,7 @@ static void gsp_latch_framebuffers(void) {
                         n++;
                     }
                 fp_frame_end(out, n);
+                eye_frame_end();
             }
             (void)bytes;
         }

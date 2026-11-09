@@ -117,6 +117,8 @@ int main(int argc, char** argv) {
         if (e) { extern const char* pica_vs_dump_path; pica_vs_dump_path = e; }
         e = getenv("MSR_FRAME_EVERY");
         if (e) msr_frame_every = (unsigned)atoi(e);
+        e = getenv("MSR_EYE");   // 1: right eye reuse (gpu/eye_reuse.c)
+        if (e && e[0] == '1') { void eye_reuse_set(int on); eye_reuse_set(1); }
     }
     { extern char msr_save_dir[512]; snprintf(msr_save_dir, sizeof msr_save_dir, "%s/save", argv[2]); }
 #ifdef MSR_VS_CHECK

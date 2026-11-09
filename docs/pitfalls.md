@@ -57,3 +57,7 @@
   orientation with an asymmetric letter (g, F), never with A (test 11 drew mirrored text).
 - Scissor is queue state the game's draws leave behind: set it before clearing the output in
   present(), or the clear misses part of the frame (test 11: the closed menu stayed visible).
+- A "fresh" id made as mix(x, x + 1) with a multiply-xorshift mix repeats: x ^ (x + 1) is 1 for
+  every even x, so every fresh token came out the same. Use a counter: mix(seed, ++n).
+- Before building a GPU saving, count what already runs: right-eye reuse was built for work the
+  frame plan already skipped (the right eye ran 3.4% of the left eye's draws).

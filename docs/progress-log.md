@@ -1,5 +1,23 @@
 # Progress log (newest first)
 
+## 2026-11-09 (night): test 14, test 15 (GPU timers)
+
+- Test 14: in single screen the file select screen is shown by itself while it is up (found from
+  pixels of its frame), back to the top screen when the game loads.
+- Right-eye reuse (gpu/eye_reuse.c) was built and checked in the probe: replays of autocapture1
+  and capture1 gave top and bottom framebuffers identical to runs without it. But the 240 s
+  gameplay probe without it already ran only 23331 right-eye draws against 679648 left-eye draws
+  (3.4%): the frame plan has been skipping the unseen right eye since test 9, and the Switch logs
+  show the same plan at work. Reuse can save at most those few percent, so it is not in the menu;
+  the code stays, off, for the probe (MSR_EYE=1). Two bugs found on the way: fresh tokens repeated
+  (see pitfalls) and the eyes' depth buffers were learned from passes that name a depth buffer
+  without using it.
+- Test 15: GPU timers. Timestamps around each part of the GPU's work give, every 5 s in the
+  receipt, "GPU time: draws, VRAM work, elsewhere or idle" in ms (the three should add up to about
+  5000, which checks the tick conversion), plus "eyes: left N draws run of M, right N run of M".
+  This tells whether test 16 (GX work kept on GPU images) or the draws themselves are where the GPU
+  time goes.
+
 ## 2026-11-09 (evening): test 12 results, test 13
 
 - Run013 (handheld): Fewer waits recorded about 62% of the barriers Safe did (3952 of 6384) with

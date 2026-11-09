@@ -11,6 +11,7 @@
 #include "msr_log.h"
 #include "pica.h"
 #include "frame_plan.h"
+#include "eye_reuse.h"
 #include <stdio.h>
 #include <time.h>
 
@@ -477,6 +478,8 @@ static void rt_stats(void) {
 void pica_rt_summary(void) {
     if (g_vfc > 0) msr_receipt("vfetch check: %llu draws, %llu inputs compared, %llu differ", g_vfc_draws, g_vfc_checked, g_vfc_bad);
     msr_receipt("frame plan: %u of %u GPU operations skipped (they fed no shown screen)", fp_skipped_ops, fp_total_ops);
+    msr_receipt("right eye reuse: %u draws skipped, %u drawn, %u times made real, %u failures", eye_skipped, eye_drawn_right,
+                eye_materialized, eye_failures);
     if (pica_vtime > 0)
         msr_receipt("vertex fetch: %llu vertices decoded in %.1f ms of CPU time", g_vtime_verts, g_vtime_ns / 1e6);
     extern unsigned gx_stat[4];
@@ -507,6 +510,7 @@ int pica_plan_draw(u32 nverts) {
     if ((r[0x114] & 3) || (dest_read && (r[0x115] & 3))) { rd[2 * nrd] = d; rd[2 * nrd + 1] = d + w * h * dbpp; nrd++; }
     static const u32 k_unit[3][3] = {{0x85, 0x82, 0x8E}, {0x95, 0x92, 0x96}, {0x9D, 0x9A, 0x9E}};
     u64 sig = 0xCBF29CE484222325ull;
+    unsigned tex0 = nrd;
     for (int u = 0; u < 3; u++) {
         if (!((r[0x80] >> u) & 1)) continue;
         u32 a = va_of(r[k_unit[u][0]] << 3), tw = r[k_unit[u][1]] >> 16, th = r[k_unit[u][1]] & 0x7FF;
@@ -517,14 +521,23 @@ int pica_plan_draw(u32 nverts) {
     sig = fnv(sig, c);
     sig = fnv(sig, d);
     sig = fnv(sig, nverts);
-    return fp_op(FP_DRAW, sig, rd, nrd, wr, nwr, !dest_read);
+    int run = fp_op(FP_DRAW, sig, rd, nrd, wr, nwr, !dest_read);
+    // the right eye's draws that repeat the left eye's (gpu/eye_reuse.c)
+    return eye_draw(run, c, d, w * h * cbpp, w * h * dbpp, (r[0x113] & 0xF) != 0, (r[0x115] & 3) != 0,
+                    dest_read, rd + 2 * tex0, nrd - tex0);
 }
 
+static void draw_inner(int indexed);
 static void draw(int indexed) {
+    draw_inner(indexed);
+    eye_draw_done();   // a right eye draw sent to the left eye's images: its targets back
+}
+static void draw_inner(int indexed) {
     const u32* r = g_pica.reg;
     u32 n = r[0x228], first = r[0x22A];
     if (n > MAX_DRAW) n = MAX_DRAW;
     g_pica.draws++;
+    { extern int eye_draw_kind; eye_draw_kind = indexed ? 1 : 0; }
     if (!pica_plan_draw(n)) return;   // feeds no shown screen this frame
     rt_stats();
     if (pica_vs_dump_path) pica_vs_key();
@@ -594,8 +607,10 @@ static void immediate_vertex(void) {
 
 static void flush_immediate(void) {
     if (!g_imm_n) return;
+    { extern int eye_draw_kind; eye_draw_kind = 2; }
     if (!pica_plan_draw(g_imm_n)) { g_imm_n = 0; return; }
     assemble_and_draw(g_verts, g_imm_n);
+    eye_draw_done();
     g_imm_n = 0;
 }
 
