@@ -213,6 +213,20 @@ static int hud_on_bottom(void) {
     return ok == 3;
 }
 
+// The file select screen ("Samus Files") is on the bottom screen: the light blue lines of its title
+// frame (y 10 at x 60 and 260, y 24 from x 110 to 210), dark just above the top one. Checked against
+// run013's picture of it and the other bottom-screen pictures (gameplay, title).
+static int file_select_on_bottom(void) {
+    const u32* b = g_upload + 400 * 240;
+    static const int pts[5][2] = {{110, 24}, {160, 24}, {210, 24}, {60, 10}, {260, 10}};
+    for (int k = 0; k < 5; k++) {
+        u32 c = b[(239 - pts[k][1]) * 320 + pts[k][0]];
+        int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
+        if (!(bl > 150 && g > 100 && r < 130)) return 0;
+    }
+    return ((b[(239 - 9) * 320 + 60] >> 16) & 0xFF) < 80;
+}
+
 // An LCD framebuffer is 240 pixels per column, columns left to right, each column bottom to top.
 static void convert_screen(int screen, u32* out, int flip) {
     MsrFramebuffer* f = &msr_fb[screen];
@@ -288,6 +302,13 @@ static void present(void) {
         DkImageRect r = {0, 0, 0, W, 240, 1};
         dkCmdBufCopyBufferToImage(g_cmd, &src, &sv[k], &r, 0);
     }
+    // single-screen mode: the file select screen comes up by itself (after A on the title screen)
+    // and goes away when the game loads; a few pictures in a row decide, so transitions do not flicker
+    if (fresh) {
+        static int on_count, off_count;
+        if (g_set.layout == LAYOUT_TOP_ONLY && file_select_on_bottom()) { off_count = 0; if (++on_count >= 3 && !g_auto_bottom) { g_auto_bottom = 1; msr_receipt("single screen: file select up, showing the bottom screen"); } }
+        else { on_count = 0; if (++off_count >= 10 && g_auto_bottom) { g_auto_bottom = 0; msr_receipt("single screen: file select gone, back to the top screen"); } }
+    }
     // the screens where the port menu's layout puts them
     Rect tr, br;
     port_menu_layout(&tr, &br);
@@ -296,7 +317,7 @@ static void present(void) {
     DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {(u32)br.x, (u32)(FB_H - br.y - br.h), 0, (u32)br.w, (u32)br.h, 1};
     if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
-    if (g_set.layout == LAYOUT_TOP_ONLY && !g_map_view && hud_on_bottom()) {
+    if (g_set.layout == LAYOUT_TOP_ONLY && !g_map_view && !g_auto_bottom && hud_on_bottom()) {
         // single-screen mode: the bottom screen's readouts, cut out of it and drawn at 2x on the top
         // one (energy, missiles, Aeion gauge and the ability cross; the selected ability; the
         // Metroid DNA and Metroids left). Bottom-screen coordinates, rows counted from the top.
@@ -558,7 +579,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 13 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 14 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
