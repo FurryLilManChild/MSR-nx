@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-09 (day): tests 6 to 7
+
+- Test 6 crashed at start (guest memory read before it was mapped; graphics-only queue). Test 6b ran
+  the title at 28 to 30 pictures per second, then crashed in a cutscene: command memory only freed
+  by waiting flushes (Atmosphere crash report + addr2line on the kept msr.elf). Test 6c: command and
+  dynamic memory go around fenced rings; playable, 30 at the start, 6 to 9 in areas with fragment
+  configurations missing from the pack; GPU at 307 MHz (handheld).
+- White-out (whole screen white with blurred yellow): seen in tests 5 and 6c, in the same kind of
+  area. The Switch shaders' lighting and combiner code matches the reference line by line; cause
+  unknown. runtime/gpu/capture.c records one frame (ZL + ZR + minus on the Switch); the probe
+  replays it on the reference renderer (MSR_REPLAY). Self-check: a title frame and a gameplay frame
+  captured and replayed in the probe give byte-identical VRAM.
+- Test 7: 11 more fragment configurations, early-depth variants for z-buffer draws, screen output
+  waits on its own fence instead of the whole queue under the lock, audio time stretching.
+
 ## 2026-11-09 (morning): VRAM on the GPU, vertex fetch on the GPU
 
 - The 3DS VRAM lives in Switch GPU memory. Fills, display transfers, texture copies, DMA into VRAM,

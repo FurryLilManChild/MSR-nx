@@ -206,11 +206,16 @@ static void present(void) {
     DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {960, 240, 0, 320, 240, 1};
     dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
+    // Submit and present, then wait for this list alone, outside the queue lock: waiting for the
+    // whole queue under the lock made the game thread stop until the GPU was idle (test 6c).
+    DkFence done;
     mutexLock(&g_qlock);
     dkQueueSubmitCommands(g_queue, dkCmdBufFinishList(g_cmd));
+    dkQueueSignalFence(g_queue, &done, false);
     dkQueuePresentImage(g_queue, g_swap, slot);
-    dkQueueWaitIdle(g_queue);
+    dkQueueFlush(g_queue);
     mutexUnlock(&g_qlock);
+    dkFenceWait(&done, -1);
     dkCmdBufClear(g_cmd);
     MSR_PERF_END(PERF_PRESENT);
 }
@@ -322,6 +327,21 @@ static void input_poll(void) {
     if (k & HidNpadButton_L) b |= 1 << 9;
     if (k & HidNpadButton_X) b |= 1 << 10;
     if (k & HidNpadButton_Y) b |= 1 << 11;
+    // ZL + ZR + minus held for a second: capture the next frame for the reference renderer
+    {
+        static unsigned held;
+        u64 combo = HidNpadButton_ZL | HidNpadButton_ZR | HidNpadButton_Minus;
+        if ((k & combo) == combo) {
+            if (++held == 60) {
+                static int nth;
+                char path[300];
+                snprintf(path, sizeof path, "%s/capture%d.bin", g_run_dir, ++nth);
+                void msr_capture_request(const char* path);
+                msr_capture_request(path);
+                msr_receipt("input: frame capture requested (%s)", path);
+            }
+        } else held = 0;
+    }
     // the first presses go to the receipt, to check that the game is being told about them
     static u32 last_b;
     static unsigned logged;
@@ -360,7 +380,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 6 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 7 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -431,6 +451,8 @@ int main(int argc, char** argv) {
                 void dkr_fs_stats(unsigned* hits, unsigned* misses);
                 dkr_fs_stats(&h, &m);
                 msr_receipt("  fragment shaders: %u draws specialized, %u on the general one", h, m);
+                unsigned dkr_ez_stats(void);
+                msr_receipt("  early depth: %u draws", dkr_ez_stats());
                 void dkr_vram_stats(unsigned* out);
                 unsigned vo[7];
                 dkr_vram_stats(vo);

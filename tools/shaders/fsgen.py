@@ -6,7 +6,9 @@ sdmc:/switch/msr/fs_new.bin) lists the registers that decide what the PICA fragm
 and their values. The shader for it is runtime/gpu/dk/pica_fsh.glsl itself with those registers
 turned into constants (the line marked MSR-STRUCTURAL) and the depth mode fixed (MSR-WBUFFER), so
 the compiler drops every combiner, operand and lighting path the configuration does not use. The
-logic is the interpreter's, unchanged; only its inputs become constants.
+logic is the interpreter's, unchanged; only its inputs become constants. For a z-buffer (not a
+w-buffer) configuration there is also an early-depth variant (key with bit 63 flipped) without the
+depth write: the renderer then gets the same depth from the viewport's depth range.
 
 Records: "PFS1", key (2 words), count n, then n pairs {register, value}, then the w-buffer flag.
 Output: fs_<key>.glsl in the output folder. Game-derived: not committed.
@@ -33,13 +35,24 @@ def read_dump(path):
     return out
 
 
-def specialize(src, pairs, wbuf):
+EZ_BIT = 1 << 63   # the early-depth variant of a configuration has this bit flipped in its key
+
+
+def specialize(src, pairs, wbuf, early_depth=False):
     lines = ['uint reg(uint id) {']
     lines += ['    if (id == 0x%Xu) return 0x%Xu;' % (r, v) for r, v in pairs]
     lines.append('    return dreg(id);')
     lines.append('}')
     out = []
+    skipping = False
     for line in src.split('\n'):
+        if early_depth and 'MSR-DEPTH-BEGIN' in line:
+            skipping = True
+            continue
+        if skipping:
+            if 'MSR-DEPTH-END' in line:
+                skipping = False
+            continue
         if 'MSR-STRUCTURAL' in line:
             out += lines
         elif 'MSR-WBUFFER' in line:
@@ -59,6 +72,8 @@ def main():
     os.makedirs(sys.argv[3], exist_ok=True)
     for key, (pairs, wbuf) in sorted(cfgs.items()):
         open(os.path.join(sys.argv[3], 'fs_%016x.glsl' % key), 'w').write(specialize(src, pairs, wbuf))
+        if not wbuf:   # z-buffer: a variant without the depth write (depth from the viewport range)
+            open(os.path.join(sys.argv[3], 'fs_%016x.glsl' % (key ^ EZ_BIT)), 'w').write(specialize(src, pairs, wbuf, True))
     print('%d fragment configurations' % len(cfgs))
 
 

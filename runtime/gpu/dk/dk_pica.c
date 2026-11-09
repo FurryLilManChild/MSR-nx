@@ -54,7 +54,7 @@ static unsigned g_draws_since_flush;
 
 static void flush(int wait);
 static const DkShader* vs_select(void);
-static const DkShader* fs_select(void);
+static const DkShader* fs_select(int* ez);
 
 // The dynamic area (vertex data, uploads, descriptors) is used as four segments in turn. When one
 // fills up, what was recorded so far is submitted with a fence, and the next segment is used once
@@ -898,7 +898,14 @@ static int dk_draw(int indexed) {
         dkCmdBufSetStencil(g_cmd, DkFace_FrontAndBack, r[0x115] ? (u8)(st >> 8) : 0, (u8)(st >> 16), (u8)(st >> 24));
     float vw = pica_f24(r[0x41]), vh = pica_f24(r[0x43]);
     s32 vx = (s32)(r[0x68] << 22) >> 22, vy = (s32)((r[0x68] >> 16) << 22) >> 22;
+    int ez = 0;
+    DkShader const* sh[2] = {vs_select(), fs_select(&ez)};
     DkViewport vp = {(float)vx, (float)vy, 2 * vw, 2 * vh, 0.0f, 1.0f};
+    if (ez) {   // the PICA depth mapping in the viewport: depth = offset + (-z/w) * (-scale)
+        float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
+        vp.near = offset;
+        vp.far = offset - scale;
+    }
     dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
     DkScissor sc = {0, 0, W, H};
     if (r[0x65] & 3) {
@@ -906,7 +913,6 @@ static int dk_draw(int indexed) {
         sc = (DkScissor){x0, y0, x1 >= x0 ? x1 - x0 + 1 : 0, y1 >= y0 ? y1 - y0 + 1 : 0};
     }
     dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
-    DkShader const* sh[2] = {vs_select(), fs_select()};
     dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
     u32 mode = (r[0x25E] >> 8) & 3;
     DkPrimitive prim = mode == 1 ? DkPrimitive_TriangleStrip : mode == 2 ? DkPrimitive_TriangleFan : DkPrimitive_Triangles;
@@ -1161,27 +1167,48 @@ static const DkShader* vs_select(void) {
 }
 
 static unsigned g_fs_hits, g_fs_misses;
-static const DkShader* fs_select(void) {
+// The fragment shader for this draw. *ez is set when it is the early-depth variant (no depth write;
+// the caller gives the viewport the PICA depth mapping instead): only for a z-buffer whose mapping
+// stays inside 0..1.
+#define EZ_BIT (1ull << 63)
+static unsigned g_ez_draws;
+static const DkShader* fs_select(int* ez) {
     static u64 last_key;
+    static int last_ez;
     static const DkShader* last = 0;
     static unsigned seen_version;
-    u64 key = pica_fs_key();
+    const u32* r = g_pica.reg;
+    float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
+    float nearz = offset, farz = offset - scale;
+    int want_ez = (r[0x6D] & 1) && nearz >= 0 && nearz <= 1 && farz >= 0 && farz <= 1;
+    u64 key = pica_fs_key() ^ (want_ez ? EZ_BIT : 0);
     if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
-    if (last && key == last_key) { if (last == &g_fsh) g_fs_misses++; else g_fs_hits++; return last; }
+    if (last && key == last_key) {
+        if (last == &g_fsh) g_fs_misses++; else g_fs_hits++;
+        *ez = last_ez;
+        if (last_ez) g_ez_draws++;
+        return last;
+    }
     last_key = key;
+    last_ez = 0;
     const DkShader* sh = g_force_fs_general ? 0 : pack_find(key);
-    if (sh) { g_fs_hits++; return last = sh; }
+    if (sh) { g_fs_hits++; last_ez = want_ez; *ez = want_ez; if (want_ez) g_ez_draws++; return last = sh; }
+    *ez = 0;
+    if (want_ez && !g_force_fs_general && (sh = pack_find(key ^ EZ_BIT)) != 0) { g_fs_hits++; return last = sh; }
     if (g_force_fs_general) { g_fs_misses++; return last = &g_fsh; }
     g_fs_misses++;
-    if (first_miss(key)) {
+    u64 base = key & ~EZ_BIT;
+    if (want_ez) base = key ^ EZ_BIT;
+    if (first_miss(base)) {
         msr_receipt("gpu: fragment shader %016llX is not in the pack; it runs on the general one (saved to fs_new.bin)",
-                    (unsigned long long)key);
-        pica_fs_dump(key, g_fs_new_path);
+                    (unsigned long long)base);
+        pica_fs_dump(base, g_fs_new_path);
     }
     return last = &g_fsh;
 }
 
 void dkr_fs_stats(unsigned* hits, unsigned* misses) { *hits = g_fs_hits; *misses = g_fs_misses; g_fs_hits = g_fs_misses = 0; }
+unsigned dkr_ez_stats(void) { unsigned n = g_ez_draws; g_ez_draws = 0; return n; }
 
 void dkr_vs_stats(unsigned* hits, unsigned* misses) { *hits = g_vs_hits; *misses = g_vs_misses; g_vs_hits = g_vs_misses = 0; }
 

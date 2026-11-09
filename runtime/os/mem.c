@@ -122,3 +122,14 @@ MsrRegion msr_mem_query(u32 addr) {
     out.name = "free";
     return out;
 }
+
+// The regions in use (for frame captures): fills base[] and size[], returns how many.
+int msr_mem_regions(u32* base, u32* size, int max) {
+    int n = 0;
+    for (int k = 0; k < g_region_count && n < max; k++) {
+        base[n] = g_regions[k].base;
+        size[n] = g_regions[k].size;
+        n++;
+    }
+    return n;
+}

@@ -25,6 +25,7 @@ int msr_mem_init(void);
 int msr_mem_map(u32 addr, u32 size, u32 perm, u32 state, const char* name);
 int msr_mem_commit(u32 addr, u32 size);   // read/write private memory
 MsrRegion msr_mem_query(u32 addr);
+int msr_mem_regions(u32* base, u32* size, int max);   // the regions in use (frame captures)
 
 // 3DS address map as used by applications (3dbrew "Memory layout"; checked against the probe).
 #define MSR_CODE_BASE    0x00100000u

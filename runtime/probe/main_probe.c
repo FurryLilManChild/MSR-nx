@@ -124,6 +124,12 @@ int main(int argc, char** argv) {
 #endif
     Cpu* c = msr_boot(argv[1]);
     if (!c) return 1;
+    if (getenv("MSR_REPLAY")) {   // replay one captured frame on the reference renderer, then stop
+        int msr_replay(const char* path, const char* out_dir);
+        int rc = msr_replay(getenv("MSR_REPLAY"), argv[2]);
+        msr_log_close();
+        return rc;
+    }
     msr_run(c, MSR_CODE_BASE, 0xFFFFFFF0u);
     msr_receipt("the entry function returned");
     msr_dump_state(c);

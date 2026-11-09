@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "frame_plan.h"
+#include "capture.h"
 #include <string.h>
 #include "hle.h"
 #include "msr_log.h"
@@ -164,9 +165,16 @@ int msr_gx_trace(void) {
     return start >= 0 && msr_top_swaps() >= (unsigned)start && msr_top_swaps() < (unsigned)start + 2;
 }   // DMA, fills, display transfers, texture copies
 
+void gx_execute(u32 id, u32* d);
 static void gx_command(u32 entry) {
     u32 id = rd32(entry) & 0xFF, d[7];
     for (int k = 0; k < 7; k++) d[k] = rd32(entry + 4 + 4 * k);
+    msr_capture_gx(id, d);
+    gx_execute(id, d);
+}
+
+// One GX command (also replayed from a frame capture by the probe).
+void gx_execute(u32 id, u32* d) {
     if (id < 8) msr_gx_counts[id]++;
     switch (id) {
     case 0x00:  // RequestDma(source, destination, size)
@@ -284,6 +292,7 @@ static void gsp_latch_framebuffers(void) {
         wr8(rec + 1, 0);
         pica_frame_shown(screen, msr_fb[screen].left, msr_fb[screen].stride, msr_fb[screen].format);
         if (pica_latch_hook) pica_latch_hook(screen);
+        if (screen == 0) msr_capture_latch();
         {
             // what the Switch shows: the left image of each screen, in every buffer the game has
             // shown it in (games double-buffer, so the next picture goes to the one not shown now)

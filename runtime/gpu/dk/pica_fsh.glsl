@@ -264,7 +264,11 @@ void main() {
     }
     out_color = prevc;
     // PICA depth: (z/w * scale + offset), times w for a w-buffer. gl_FragCoord.z is -z/w here.
+    // (The shader pack's early-depth variants drop these lines: for a z-buffer the same value comes
+    // from the viewport's depth range, and the GPU can then test depth before running the shader.)
+    // MSR-DEPTH-BEGIN
     float d = -gl_FragCoord.z * depth.x + depth.y;
     if (wbuffer()) d *= 1.0 / gl_FragCoord.w;
     gl_FragDepth = clamp(d, 0.0, 1.0);
+    // MSR-DEPTH-END
 }
