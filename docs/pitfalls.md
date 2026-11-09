@@ -39,3 +39,7 @@
   running (with status messages) or schedule a wake-up; never promise unattended work otherwise.
 - uam replaces non-constant integer division with float math that can be off by one; GPU kernels use
   udiv() (float estimate, then corrected) or shifts.
+- The GPU command buffer's memory was only reclaimed on a waiting flush; once test 6 removed the
+  readbacks, nothing waited and the 8 MB filled up in a cutscene (deko3d RaiseError OutOfMemory).
+  Command memory and the dynamic area now go around rings guarded by fences. Keep the msr.elf of
+  every build sent to Mark: Atmosphere crash reports give offsets that addr2line turns into lines.

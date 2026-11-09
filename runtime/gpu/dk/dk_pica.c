@@ -24,7 +24,11 @@
 
 #define DYN_SIZE (32u << 20)
 #define IMG_SIZE (128u << 20)
-#define CMD_SIZE (8u << 20)
+#define CMD_SIZE (16u << 20)
+#define CMD_CHUNK (256u << 10)
+#define CMD_CHUNKS (CMD_SIZE / CMD_CHUNK)
+#define DYN_SEGS 4u
+#define DYN_SEG (DYN_SIZE / DYN_SEGS)
 #define SURF_REGION (64u << 20)
 #define VS_UBO_SIZE 0xA00u
 #define FS_UBO_SIZE 0x600u
@@ -52,14 +56,23 @@ static void flush(int wait);
 static const DkShader* vs_select(void);
 static const DkShader* fs_select(void);
 
+// The dynamic area (vertex data, uploads, descriptors) is used as four segments in turn. When one
+// fills up, what was recorded so far is submitted with a fence, and the next segment is used once
+// the GPU has finished with it (normally long ago). Test 6b crashed when nothing ever freed memory.
+static u32 g_dyn_seg;
+static void dyn_next_segment(void);
 static u32 dyn_alloc(u32 size, u32 align) {
     u32 p = (g_dyn_pos + align - 1) & ~(align - 1);
-    if (p + size > DYN_SIZE) {   // full: let the GPU finish everything and start over
-        flush(1);
-        p = 0;
+    if (p + size > (g_dyn_seg + 1) * DYN_SEG) {
+        dyn_next_segment();
+        p = (g_dyn_pos + align - 1) & ~(align - 1);
     }
     g_dyn_pos = p + size;
     return p;
+}
+// Room for need bytes in the current segment (a draw keeps all its data together).
+static void dyn_reserve(u32 need) {
+    if (((g_dyn_pos + 255) & ~255u) + need > (g_dyn_seg + 1) * DYN_SEG) dyn_next_segment();
 }
 
 // ---- surfaces (render targets) --------------------------------------------------------------------
@@ -566,20 +579,52 @@ static unsigned g_program_uploaded = ~0u;
 static DkGpuAddr g_program_addr;
 static unsigned g_flushes;
 
+// Command memory is handed to the command buffer in 256 KB chunks around a ring. Each submitted
+// list's chunks carry the fence signalled after it, and a chunk is reused only after that fence.
+static DkFence g_chunk_fence[CMD_CHUNKS];
+static u8 g_chunk_pending[CMD_CHUNKS];
+static u32 g_chunk_next, g_list_chunks[CMD_CHUNKS], g_list_n;
+static DkFence g_seg_fence[DYN_SEGS];
+static u8 g_seg_pending[DYN_SEGS];
+static DkFence g_last_fence;
+
+static void cmd_add_chunk(void) {
+    u32 c = g_chunk_next;
+    g_chunk_next = (c + 1) % CMD_CHUNKS;
+    if (g_chunk_pending[c]) { dkFenceWait(&g_chunk_fence[c], -1); g_chunk_pending[c] = 0; }
+    dkCmdBufAddMemory(g_cmd, g_cmdmem, c * CMD_CHUNK, CMD_CHUNK);
+    if (g_list_n < CMD_CHUNKS) g_list_chunks[g_list_n++] = c;
+}
+static void cmd_out_of_memory(void* user, DkCmdBuf cmd, size_t need) { (void)user; (void)cmd; (void)need; cmd_add_chunk(); }
+
 static void flush(int wait) {
     mutexLock(g_qlock);
     dkQueueSubmitCommands(g_q, dkCmdBufFinishList(g_cmd));
+    dkQueueSignalFence(g_q, &g_last_fence, false);
     dkQueueFlush(g_q);
     if (wait) { MSR_PERF_BEGIN(PERF_GPU_WAIT); dkQueueWaitIdle(g_q); MSR_PERF_END(PERF_GPU_WAIT); }
     mutexUnlock(g_qlock);
-    if (wait) {
-        dkCmdBufClear(g_cmd);
-        g_dyn_pos = 0;
-        g_program_uploaded = ~0u;   // it lived in the dynamic area
+    for (u32 k = 0; k < g_list_n; k++) {
+        g_chunk_fence[g_list_chunks[k]] = g_last_fence;
+        g_chunk_pending[g_list_chunks[k]] = !wait;
     }
+    g_list_n = 0;
+    dkCmdBufClear(g_cmd);
+    cmd_add_chunk();
+    if (wait) for (u32 k = 0; k < DYN_SEGS; k++) g_seg_pending[k] = 0;   // the GPU is idle
     g_draws_since_flush = 0;
     g_flushes++;
     g_bound_color = g_bound_depth = 0;   // bindings do not carry over a new command list
+}
+
+static void dyn_next_segment(void) {
+    flush(0);   // everything using this segment is submitted; its fence marks when it is free
+    g_seg_fence[g_dyn_seg] = g_last_fence;
+    g_seg_pending[g_dyn_seg] = 1;
+    g_dyn_seg = (g_dyn_seg + 1) % DYN_SEGS;
+    if (g_seg_pending[g_dyn_seg]) { dkFenceWait(&g_seg_fence[g_dyn_seg], -1); g_seg_pending[g_dyn_seg] = 0; }
+    g_dyn_pos = g_dyn_seg * DYN_SEG;
+    g_program_uploaded = ~0u;   // the program copy lived in the segment left behind
 }
 
 // ---- state mapping ---------------------------------------------------------------------------------
@@ -682,7 +727,7 @@ static int dk_draw(int indexed) {
     pica_vertex_layout(lo, count, vsrc, vcp, &ncp, &vbytes);
     if (!vbytes) vbytes = 16;
     u32 need = vbytes + n * 2 + (4096 + 128) * 4 + 1024 + 4 * 256;
-    if (((g_dyn_pos + 255) & ~255u) + need > DYN_SIZE) flush(1);
+    dyn_reserve(need);
     u32 voff = dyn_alloc(vbytes, 256);
     MSR_PERF_BEGIN(PERF_VERTEX);
     for (u32 k = 0; k < ncp; k++) memcpy(g_dyn_cpu + voff + vcp[k].dst, g_mem + vcp[k].src, vcp[k].bytes);
@@ -1186,8 +1231,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_cmdmem = dkMemBlockCreate(&mm);
     DkCmdBufMaker cm;
     dkCmdBufMakerDefaults(&cm, dev);
+    cm.cbAddMem = cmd_out_of_memory;
     g_cmd = dkCmdBufCreate(&cm);
-    dkCmdBufAddMemory(g_cmd, g_cmdmem, 0, CMD_SIZE);
+    cmd_add_chunk();
 
     // the lighting tables: 256 x 24, value and difference
     DkImageLayoutMaker lm;
