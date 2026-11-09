@@ -21,7 +21,15 @@ layout (std140, binding = 1) uniform FragmentState {
     vec4 depth;       // x scale, y offset, z 1 for a w-buffer
 };
 
-uint dreg(uint id) { uint i = id - 0x80u; return regs[i >> 2][i & 3u]; }
+// The register's word: the uvec4 by index, then the component by plain choices. (Selecting a vector
+// component with a run-time index was the general shader's suspected fault on the Switch: the
+// whole screen went white wherever this shader was drawing, test builds 5 to 7.)
+uint dreg(uint id) {
+    uint i = id - 0x80u;
+    uvec4 v = regs[i >> 2];
+    uint c = i & 3u;
+    return c == 0u ? v.x : c == 1u ? v.y : c == 2u ? v.z : v.w;
+}
 // The shader pack's fragment shaders replace the next two lines with constants for the registers
 // that choose what the shader does (tools/shaders/pica2glsl.py, fragment_shader()); everything else
 // still comes from the uniform block. Keep reg() for those registers and dreg() for values.

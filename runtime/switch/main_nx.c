@@ -329,10 +329,14 @@ static void input_poll(void) {
     if (k & HidNpadButton_Y) b |= 1 << 11;
     // ZL + ZR + minus held for a second: capture the next frame for the reference renderer
     {
-        static unsigned held;
+        static unsigned long long held_since;
+        static int fired;
         u64 combo = HidNpadButton_ZL | HidNpadButton_ZR | HidNpadButton_Minus;
         if ((k & combo) == combo) {
-            if (++held == 60) {
+            unsigned long long t = msr_now_ns();
+            if (!held_since) held_since = t;
+            if (!fired && t - held_since >= 1000000000ull) {   // a second by the clock (test 7 counted loops)
+                fired = 1;
                 static int nth;
                 char path[300];
                 snprintf(path, sizeof path, "%s/capture%d.bin", g_run_dir, ++nth);
@@ -340,7 +344,7 @@ static void input_poll(void) {
                 msr_capture_request(path);
                 msr_receipt("input: frame capture requested (%s)", path);
             }
-        } else held = 0;
+        } else { held_since = 0; fired = 0; }
     }
     // the first presses go to the receipt, to check that the game is being told about them
     static u32 last_b;
@@ -380,7 +384,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 7 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 8 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -467,6 +471,29 @@ int main(int argc, char** argv) {
             next_report = now + 5000000000ull;
             // pictures of both screens every 30 seconds, for comparing against the reference renderer
             if (++reports % 6 == 0) shot_at = now;
+        }
+        {   // the top screen mostly white (the white-out): capture that frame, up to twice a run
+            static unsigned long long next_check;
+            static int auto_caps;
+            if (g_gpu_render && auto_caps < 2 && now >= next_check) {
+                next_check = now + 1000000000ull;
+                unsigned white = 0, total = 0;
+                for (u32 y = 8; y < 240; y += 16)
+                    for (u32 x = 8; x < 400; x += 16) {
+                        u32 c = g_upload[y * 400 + x];
+                        if ((c & 0xFF) > 235 && ((c >> 8) & 0xFF) > 235 && ((c >> 16) & 0xFF) > 235) white++;
+                        total++;
+                    }
+                if (white * 10 >= total * 8) {   // 80% of the samples
+                    char path[300];
+                    snprintf(path, sizeof path, "%s/autocapture%d.bin", g_run_dir, ++auto_caps);
+                    void msr_capture_request(const char* path);
+                    msr_capture_request(path);
+                    msr_receipt("white-out detected (%u of %u samples white): capturing the next frame (%s)", white, total, path);
+                    shot_at = now;   // and pictures of both screens
+                    next_check = now + 20000000000ull;
+                }
+            }
         }
         if (shot_at && now >= shot_at) {
             char tag[48];
