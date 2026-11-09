@@ -298,6 +298,20 @@ static void surf_readback(Surf* s) {
     MSR_PERF_END(PERF_READBACK);
 }
 
+// Out of surface slots or surface memory: every render target goes back to memory (VRAM or guest)
+// and the set starts over; they are loaded again from there when next drawn to. Depth buffers start
+// cleared (this game clears them every frame).
+static u32 g_img_floor;
+static void surf_reset_all(void) {
+    for (int k = 0; k < MAX_SURF; k++)
+        if (g_surf[k].used && g_surf[k].gpu_dirty) surf_readback(&g_surf[k]);
+    flush(1);
+    for (int k = 0; k < MAX_SURF; k++) g_surf[k].used = 0;
+    g_img_pos = g_img_floor;
+    g_bound_color = g_bound_depth = 0;
+    msr_receipt("gpu: render target set started over (out of slots or memory)");
+}
+
 static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     Surf* free_s = 0;
     for (int k = 0; k < MAX_SURF; k++) {
@@ -305,7 +319,7 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
         if (s->used && s->addr == addr && s->w == w && s->h == h && s->depth == depth) { s->fmt = fmt; return s; }
         if (!s->used && !free_s) free_s = s;
     }
-    if (!free_s) return 0;
+    if (!free_s) { surf_reset_all(); free_s = &g_surf[0]; }
     Surf* s = free_s;
     DkImageLayoutMaker lm;
     DkImageLayout lay;
@@ -316,6 +330,7 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     lm.dimensions[1] = h;
     dkImageLayoutInitialize(&lay, &lm);
     u32 off = img_alloc(&lay);
+    if (off == ~0u) { surf_reset_all(); s = &g_surf[0]; off = img_alloc(&lay); }
     if (off == ~0u) return 0;
     memset(s, 0, sizeof *s);
     dkImageInitialize(&s->img, &lay, g_img, off);
@@ -1244,6 +1259,7 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     lm.dimensions[1] = 24;
     dkImageLayoutInitialize(&lay, &lm);
     dkImageInitialize(&g_lut_img, &lay, g_img, img_alloc(&lay));
+    g_img_floor = g_img_pos;   // render targets go after the lighting tables
 
     pica_draw_hook = dk_draw;
     pica_sync_hook = dk_sync;
