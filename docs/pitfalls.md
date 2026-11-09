@@ -30,3 +30,8 @@
   per_warp_scratch_sz) of every generated shader; translate per configuration instead.
 - deko3d's OriginLowerLeft makes the swapchain flip the whole window vertically; 2D-engine blits are
   not flipped, so a picture blitted to the swapchain shows upside down.
+- Designing a Switch test that needs file moves between launches (vsinterp/fsgeneral files), a new
+  folder per test, and screenshots from the Album: all against Mark's standing preferences. Read the
+  project preferences before designing any test. Tests cycle their settings inside one launch, save
+  their own pictures and write each run into its own switchlogs folder.
+- Building a test before Mark's go-ahead (test 3 and the first test 4).
