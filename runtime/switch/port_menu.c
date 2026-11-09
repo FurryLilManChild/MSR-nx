@@ -36,7 +36,7 @@ static const char* sw_name(u64 b) {
 }
 
 // rows: 0 layout, 1 clock, 2..9 bindings, 10 reset bindings, 11 close
-enum { ROW_LAYOUT, ROW_CLOCK, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
+enum { ROW_LAYOUT, ROW_CLOCK, ROW_FPS, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 
 // ---- clocks -----------------------------------------------------------------------------------------
 static int g_clk_ok = -1;
@@ -59,7 +59,7 @@ static void save(void) {
     // written in place: the SD card cannot rename over an existing file (learned on MPH-nx)
     FILE* f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "layout=%d\nclock=%d\n", g_set.layout, g_set.clock);
+    fprintf(f, "layout=%d\nclock=%d\nfps=%d\n", g_set.layout, g_set.clock, g_set.show_fps);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -78,6 +78,7 @@ void port_menu_init(const char* settings_path) {
             unsigned long long b;
             if (sscanf(line, "layout=%d", &v) == 1 && v >= 0 && v < LAYOUT_COUNT) g_set.layout = v;
             else if (sscanf(line, "clock=%d", &v) == 1 && v >= 0 && v < CLOCK_COUNT) g_set.clock = v;
+            else if (sscanf(line, "fps=%d", &v) == 1) g_set.show_fps = v != 0;
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
         fclose(f);
@@ -98,7 +99,7 @@ static void fill(int x, int y, int w, int h, u32 c) {
 
 // libnx's console font: 256 glyphs of 16x16, one little-endian u16 per row, bit 15 the left pixel
 // (test 11 read bit 0 as the left one and drew every letter mirrored).
-static void text(int x, int y, const char* s, u32 c) {
+static void text_to(u32* buf, int bw, int bh, int x, int y, const char* s, u32 c) {
     const u16* font = (const u16*)consoleGetDefault()->font.gfx;
     for (; *s; s++, x += 16) {
         const u16* g = font + 16 * (u8)*s;
@@ -106,10 +107,11 @@ static void text(int x, int y, const char* s, u32 c) {
             for (int b = 0; b < 16; b++)
                 if ((g[r] >> (15 - b)) & 1) {
                     int px = x + b, py = y + r;
-                    if (px >= 0 && px < PANEL_W && py >= 0 && py < PANEL_H) g_panel[py * PANEL_W + px] = c;
+                    if (px >= 0 && px < bw && py >= 0 && py < bh) buf[py * bw + px] = c;
                 }
     }
 }
+static void text(int x, int y, const char* s, u32 c) { text_to(g_panel, PANEL_W, PANEL_H, x, y, s, c); }
 
 #define RGBA(r, g, b) (0xFF000000u | ((u32)(b) << 16) | ((u32)(g) << 8) | (u32)(r))
 static void draw(void) {
@@ -127,6 +129,7 @@ static void draw(void) {
         const char* label = "";
         if (r == ROW_LAYOUT) { label = "Screen layout"; snprintf(v, sizeof v, "< %s >", k_layout_names[g_set.layout]); }
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
+        else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r < ROW_RESET) {
             int k = r - ROW_BIND0;
             label = k_bind_names[k];
@@ -180,6 +183,7 @@ u32 port_menu_input(u64 held) {
         if (down & (HidNpadButton_Down | HidNpadButton_StickLDown)) { g_row = (g_row + 1) % NROWS; g_dirty = 1; }
         if (down & (HidNpadButton_Up | HidNpadButton_StickLUp)) { g_row = (g_row + NROWS - 1) % NROWS; g_dirty = 1; }
         if (dx && g_row == ROW_LAYOUT) { g_set.layout = (g_set.layout + LAYOUT_COUNT + dx) % LAYOUT_COUNT; g_dirty = 1; }
+        if ((dx || (down & HidNpadButton_A)) && g_row == ROW_FPS) { g_set.show_fps = !g_set.show_fps; g_dirty = 1; }
         if (dx && g_row == ROW_CLOCK) { g_set.clock = (g_set.clock + CLOCK_COUNT + dx) % CLOCK_COUNT; clock_apply(); g_dirty = 1; }
         if (down & HidNpadButton_A) {
             if (g_row >= ROW_BIND0 && g_row < ROW_RESET) { g_wait_bind = g_row - ROW_BIND0; g_dirty = 1; }
@@ -228,4 +232,17 @@ void port_menu_layout(Rect* t, Rect* b) {
     case LAYOUT_STACKED: *t = (Rect){340, 0, 600, 360}; *b = (Rect){400, 360, 480, 360}; break;    // both 1.5x
     case LAYOUT_TOP_ONLY: *t = (Rect){40, 0, 1200, 720}; *b = (Rect){0, 0, 0, 0}; break;           // 3x
     }
+}
+
+// ---- frame counter -------------------------------------------------------------------------------------
+static u32 g_fps_px[FPS_W * FPS_H];
+const u32* port_menu_fps(int fps10) {
+    static int last = -1;
+    if (fps10 == last) return 0;
+    last = fps10;
+    for (int i = 0; i < FPS_W * FPS_H; i++) g_fps_px[i] = RGBA(0, 0, 0);
+    char t[32];
+    snprintf(t, sizeof t, "%2d.%d fps", fps10 / 10, fps10 % 10);
+    text_to(g_fps_px, FPS_W, FPS_H, 4, 4, t, fps10 >= 290 ? RGBA(120, 255, 140) : fps10 >= 200 ? RGBA(255, 220, 90) : RGBA(255, 110, 90));
+    return g_fps_px;
 }

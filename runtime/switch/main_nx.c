@@ -62,8 +62,8 @@ static void* game_main(void* arg) {
 static DkDevice g_dev;
 static DkQueue g_queue;
 static DkSwapchain g_swap;
-static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem;
-static DkImage g_fb[2], g_scr[2], g_panel_img;
+static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem, g_fps_mem;
+static DkImage g_fb[2], g_scr[2], g_panel_img, g_fps_img;
 static DkCmdBuf g_cmd;
 static u32* g_upload;   // CPU-visible staging: top 400x240 then bottom 320x240, RGBA8
 static Mutex g_qlock;   // the game's renderer and the presenter share the queue
@@ -136,6 +136,20 @@ static void display_init(void) {
         mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
         g_panel_mem = dkMemBlockCreate(&mm);
         dkImageInitialize(&g_panel_img, &pl, g_panel_mem, img_off);
+        // and the frame counter's
+        dkImageLayoutMakerDefaults(&lm, g_dev);
+        lm.flags = DkImageFlags_Usage2DEngine;
+        lm.format = DkImageFormat_RGBA8_Unorm;
+        lm.dimensions[0] = FPS_W;
+        lm.dimensions[1] = FPS_H;
+        dkImageLayoutInitialize(&pl, &lm);
+        psz = (u32)dkImageLayoutGetSize(&pl);
+        pal = dkImageLayoutGetAlignment(&pl);
+        img_off = (FPS_W * FPS_H * 4 + pal - 1) & ~(pal - 1);
+        dkMemBlockMakerDefaults(&mm, g_dev, (img_off + psz + 0xFFFF) & ~0xFFFFu);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+        g_fps_mem = dkMemBlockCreate(&mm);
+        dkImageInitialize(&g_fps_img, &pl, g_fps_mem, img_off);
     }
 
     dkMemBlockMakerDefaults(&mm, g_dev, 0x10000);
@@ -238,6 +252,31 @@ static void present(void) {
     DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {(u32)br.x, (u32)(FB_H - br.y - br.h), 0, (u32)br.w, (u32)br.h, 1};
     dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
+    if (g_set.show_fps) {   // pictures the game showed on the top screen in the last half second or so
+        static unsigned long long t0;
+        static unsigned s0;
+        static int fps10;
+        unsigned long long t = msr_now_ns();
+        if (!t0) { t0 = t; s0 = msr_fb[0].swaps; }
+        if (t - t0 >= 500000000ull) {
+            fps10 = (int)((msr_fb[0].swaps - s0) * 10000000000ull / (t - t0));
+            if (fps10 > 999) fps10 = 999;
+            t0 = t;
+            s0 = msr_fb[0].swaps;
+        }
+        DkImageView fv;
+        dkImageViewDefaults(&fv, &g_fps_img);
+        const u32* px = port_menu_fps(fps10);
+        if (px) {
+            u32* dst = (u32*)dkMemBlockGetCpuAddr(g_fps_mem);
+            for (u32 y = 0; y < FPS_H; y++) memcpy(dst + y * FPS_W, px + (FPS_H - 1 - y) * FPS_W, FPS_W * 4);
+            DkCopyBuf src = {dkMemBlockGetGpuAddr(g_fps_mem), 0, 0};
+            DkImageRect r = {0, 0, 0, FPS_W, FPS_H, 1};
+            dkCmdBufCopyBufferToImage(g_cmd, &src, &fv, &r, 0);
+        }
+        DkImageRect fs = {0, 0, 0, FPS_W, FPS_H, 1}, fd = {8, FB_H - 8 - FPS_H, 0, FPS_W, FPS_H, 1};   // top left
+        dkCmdBufBlitImage(g_cmd, &fv, &fs, &fbv, &fd, 0, 0);
+    }
     if (g_menu_open) {
         DkImageView pv;
         dkImageViewDefaults(&pv, &g_panel_img);
@@ -425,7 +464,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 11b (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 11c (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
