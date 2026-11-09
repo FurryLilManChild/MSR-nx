@@ -78,6 +78,7 @@ extern const char* pica_vs_dump_path;
 void pica_vs_dump(u64 key, const char* path);
 // The same for the fragment pipeline's configuration (which combiner and lighting paths a draw uses).
 u64 pica_fs_key(void);
+unsigned pica_fs_pairs(u32* regs, u32* vals, u32* wbuf);   // at most 64 pairs
 void pica_fs_dump(u64 key, const char* path);
 extern const char* pica_fs_dump_path;   // appends the current configuration to a dump file   // when set, new configurations are appended to this file
 // Runs the vertex shader for one vertex: inputs v0..v15, writes the outputs o0..o15.

@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 9 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 10 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -406,6 +406,8 @@ int main(int argc, char** argv) {
         snprintf(vs_new, sizeof vs_new, "%s/vs_new.bin", g_run_dir);
         snprintf(fs_new, sizeof fs_new, "%s/fs_new.bin", g_run_dir);
         dkr_load_pack(msr_pack_data, msr_pack_data ? (size_t)(msr_pack_end - msr_pack_data) : 0, vs_new, fs_new);
+        void dkr_compiler_init(const char* cache_dir);
+        dkr_compiler_init(DIR "/shadercache");
         void dkr_selftest(const u8* rec, size_t size, const char* png_path);
         char st_png[300];
         snprintf(st_png, sizeof st_png, "%s/selftest.png", g_run_dir);
@@ -459,9 +461,14 @@ int main(int argc, char** argv) {
                 unsigned h, m;
                 dkr_vs_stats(&h, &m);
                 msr_receipt("  vertex shaders: %u draws translated, %u on the interpreter", h, m);
-                void dkr_fs_stats(unsigned* hits, unsigned* misses);
-                dkr_fs_stats(&h, &m);
-                msr_receipt("  fragment shaders: %u draws specialized, %u on the general one", h, m);
+                void dkr_fs_stats(unsigned* hits, unsigned* misses, unsigned* waits);
+                unsigned wt;
+                dkr_fs_stats(&h, &m, &wt);
+                msr_receipt("  fragment shaders: %u draws specialized, %u on the general one, %u waited for a compile", h, m, wt);
+                void dkr_compile_stats(unsigned* compiled, unsigned* avg_ms, unsigned* max_ms, unsigned* pending);
+                unsigned cc, ca, cm, cp;
+                dkr_compile_stats(&cc, &ca, &cm, &cp);
+                if (cc || cp) msr_receipt("  compiled on the Switch so far: %u (%u ms each on average, longest %u ms), %u in progress", cc, ca, cm, cp);
                 unsigned dkr_ez_stats(void);
                 msr_receipt("  early depth: %u draws", dkr_ez_stats());
                 void dkr_vram_stats(unsigned* out);

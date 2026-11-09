@@ -15,3 +15,9 @@ Pinned to the commits read on 2026-11-07. None of these dictate our design.
 - Mixing GPL-3 (TriAevum) code into this repo makes the port GPL-3. msr2ds files are
   GPL-2.0-or-later, so they can join a GPL-3 port. MIT pieces (Zakuro, 3dsrecomp) fit either way.
   Proposed repo license: GPL-3.0-or-later (Mark decides).
+
+## uam (Switch build)
+
+- devkitPro/uam at 5a5afc2bae8b55409ab36ba45be63fcb73f68993, zlib license (mesa-imported/ parts MIT).
+  The deko3d shader compiler, built for the Switch by tools/switch/uam/build.sh and linked into
+  msr.nro so fragment shaders missing from the pack are compiled on the console.

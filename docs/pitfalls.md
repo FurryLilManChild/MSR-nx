@@ -50,3 +50,6 @@
   fragment shader was the only one with local memory (2048 bytes per warp) and the only one seen
   drawing white on the Switch; the CPU replay of the same frame was correct. Check per_warp_scratch_sz
   of every fragment shader too, and keep it at 0.
+- Taking a correlation (local memory only in the general shader, white-out only where it drew) as
+  the likely cause: the on-device self-test showed the rewritten shader just as wrong. Put the check
+  on the hardware first when a GPU-only fault cannot be reproduced on the PC.

@@ -420,6 +420,16 @@ void pica_fs_dump(u64 h, const char* path) {
     fclose(f);
 }
 
+// The current configuration as register/value pairs (the same values the key is made from), for
+// specializing the fragment shader on the Switch. Returns the pair count.
+unsigned pica_fs_pairs(u32* regs, u32* vals, u32* wbuf) {
+    u32 v[FS_NREGS + 1];
+    fs_values(v);
+    for (u32 k = 0; k < FS_NREGS; k++) { regs[k] = k_fs_regs[k][0]; vals[k] = v[k]; }
+    *wbuf = v[FS_NREGS];
+    return FS_NREGS;
+}
+
 u64 pica_fs_key(void) {
     u32 v[FS_NREGS + 1];
     fs_values(v);

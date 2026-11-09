@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <switch.h>
 #include "msr_log.h"
 #include "pica.h"
@@ -44,7 +46,7 @@ static DkMemBlock g_rb;
 static u8* g_rb_cpu;
 static DkGpuAddr g_rb_gpu;
 static DkCmdBuf g_cmd;
-static DkShader g_vsh, g_fsh, g_test_vsh, g_fsh_test8;
+static DkShader g_vsh, g_fsh, g_test_vsh;
 static u8* g_dyn_cpu;
 static DkGpuAddr g_dyn_gpu;
 static u32 g_dyn_pos, g_img_pos, g_tex_pos = SURF_REGION;
@@ -900,6 +902,7 @@ static int dk_draw(int indexed) {
     s32 vx = (s32)(r[0x68] << 22) >> 22, vy = (s32)((r[0x68] >> 16) << 22) >> 22;
     int ez = 0;
     DkShader const* sh[2] = {vs_select(), fs_select(&ez)};
+    if (!sh[1]) return 1;   // its fragment shader is still compiling: this draw sits out
     DkViewport vp = {(float)vx, (float)vy, 2 * vw, 2 * vh, 0.0f, 1.0f};
     if (ez) {   // the PICA depth mapping in the viewport: depth = offset + (-z/w) * (-scale)
         float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
@@ -1169,9 +1172,14 @@ static const DkShader* vs_select(void) {
 static unsigned g_fs_hits, g_fs_misses;
 // The fragment shader for this draw. *ez is set when it is the early-depth variant (no depth write;
 // the caller gives the viewport the PICA depth mapping instead): only for a z-buffer whose mapping
-// stays inside 0..1.
+// stays inside 0..1. Null while the configuration is being compiled on the Switch (the draw waits
+// out those frames rather than run on the general shader).
 #define EZ_BIT (1ull << 63)
-static unsigned g_ez_draws;
+static unsigned g_ez_draws, g_fs_waits;
+static const DkShader* rt_find(u64 key);
+static int fs_compile_request(u64 key, int ez);
+static void fs_compile_poll(void);
+static volatile unsigned g_jobs_live;
 static const DkShader* fs_select(int* ez) {
     static u64 last_key;
     static int last_ez;
@@ -1181,7 +1189,9 @@ static const DkShader* fs_select(int* ez) {
     float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
     float nearz = offset, farz = offset - scale;
     int want_ez = (r[0x6D] & 1) && nearz >= 0 && nearz <= 1 && farz >= 0 && farz <= 1;
-    u64 key = pica_fs_key() ^ (want_ez ? EZ_BIT : 0);
+    u64 base = pica_fs_key();
+    u64 key = base ^ (want_ez ? EZ_BIT : 0);
+    if (g_jobs_live) fs_compile_poll();
     if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
     if (last && key == last_key) {
         if (last == &g_fsh) g_fs_misses++; else g_fs_hits++;
@@ -1189,25 +1199,261 @@ static const DkShader* fs_select(int* ez) {
         if (last_ez) g_ez_draws++;
         return last;
     }
-    last_key = key;
-    last_ez = 0;
-    const DkShader* sh = g_force_fs_general ? 0 : pack_find(key);
-    if (sh) { g_fs_hits++; last_ez = want_ez; *ez = want_ez; if (want_ez) g_ez_draws++; return last = sh; }
     *ez = 0;
-    if (want_ez && !g_force_fs_general && (sh = pack_find(key ^ EZ_BIT)) != 0) { g_fs_hits++; return last = sh; }
-    if (g_force_fs_general) { g_fs_misses++; return last = &g_fsh; }
-    g_fs_misses++;
-    u64 base = key & ~EZ_BIT;
+    if (g_force_fs_general) { g_fs_misses++; last_key = key; last_ez = 0; return last = &g_fsh; }
+    const DkShader* sh;
+    int got_ez = want_ez;
+    if (!(sh = pack_find(key)) && !(sh = rt_find(key))) {
+        got_ez = 0;
+        if (want_ez && !(sh = pack_find(base))) sh = rt_find(base);
+    }
+    if (sh) {
+        g_fs_hits++;
+        last_key = key; last_ez = got_ez; *ez = got_ez;
+        if (got_ez) g_ez_draws++;
+        return last = sh;
+    }
+    // missing: compile it here (the exact variant wanted); the general shader only if that failed
     if (first_miss(base)) {
-        msr_receipt("gpu: fragment shader %016llX is not in the pack; it runs on the general one (saved to fs_new.bin)",
+        msr_receipt("gpu: fragment shader %016llX is not in the pack; compiling it on the Switch (saved to fs_new.bin)",
                     (unsigned long long)base);
         pica_fs_dump(base, g_fs_new_path);
     }
+    if (fs_compile_request(key, want_ez)) { g_fs_waits++; last = 0; return 0; }
+    g_fs_misses++;
+    last_key = key; last_ez = 0;
     return last = &g_fsh;
 }
 
-void dkr_fs_stats(unsigned* hits, unsigned* misses) { *hits = g_fs_hits; *misses = g_fs_misses; g_fs_hits = g_fs_misses = 0; }
+void dkr_fs_stats(unsigned* hits, unsigned* misses, unsigned* waits) { *hits = g_fs_hits; *misses = g_fs_misses; *waits = g_fs_waits; g_fs_hits = g_fs_misses = g_fs_waits = 0; }
 unsigned dkr_ez_stats(void) { unsigned n = g_ez_draws; g_ez_draws = 0; return n; }
+
+// ---- fragment shaders compiled on the Switch ----------------------------------------------------
+// A configuration missing from the pack is specialized here exactly as tools/shaders/fsgen.py does
+// (pica_fsh.glsl with the configuration's registers as constants) and compiled by uam, the same
+// compiler the pack is built with, linked in from tools/switch/uam. A worker thread compiles; the
+// result goes to sdmc:/switch/msr/shadercache, which is loaded at start, so each configuration is
+// compiled once per SD card.
+int msr_uam_compile_frag(const char* glsl, const char* out_path);   // tools/switch/uam/uam_iface.cpp
+#define RT_CODE_SIZE (16u << 20)
+#define RT_MAX 2048
+#define MAX_JOBS 64
+typedef struct { u64 key; DkShader sh; } RtShader;
+static RtShader g_rt[RT_MAX];
+static u32 g_rt_n, g_rt_pos;
+static DkMemBlock g_rt_code;
+static char g_cache_dir[256];
+enum { JOB_FREE, JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_FAILED };
+typedef struct { int state; u64 key; char* glsl; u8* dksh; u32 size; u32 ms; } Job;
+static Job g_jobs[MAX_JOBS];
+static Mutex g_jmutex;
+static CondVar g_jcond;
+static Thread g_cthread;
+static int g_compiler_on;
+static u64 g_failed[256];
+static unsigned g_nfailed, g_compiled, g_compile_ms, g_compile_max_ms, g_cache_loaded;
+
+static const DkShader* rt_find(u64 key) {
+    for (u32 k = 0; k < g_rt_n; k++) if (g_rt[k].key == key) return &g_rt[k].sh;
+    return 0;
+}
+
+static int rt_install(u64 key, const u8* dksh, u32 size) {
+    if (size < 64 || memcmp(dksh, "DKSH", 4) || g_rt_n >= RT_MAX) return 0;
+    u32 pos = (g_rt_pos + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
+    if (pos + size + DK_SHADER_CODE_UNUSABLE_SIZE > RT_CODE_SIZE) return 0;
+    memcpy((u8*)dkMemBlockGetCpuAddr(g_rt_code) + pos, dksh, size);
+    DkShaderMaker sm;
+    dkShaderMakerDefaults(&sm, g_rt_code, pos);
+    dkShaderInitialize(&g_rt[g_rt_n].sh, &sm);
+    g_rt[g_rt_n].key = key;
+    g_rt_n++;
+    g_rt_pos = pos + size;
+    return 1;
+}
+
+// pica_fsh.glsl for the current configuration: fsgen.py's specialize(), line for line.
+static char* fs_source_from(const u32* regs, const u32* vals, unsigned n, u32 wbuf, int ez) {
+    size_t src_len = strlen(pica_fsh_glsl);
+    char* out = (char*)malloc(src_len + 64 * 64 + 256);
+    if (!out) return 0;
+    char* o = out;
+    o += sprintf(o, "// Specialized on the Switch from pica_fsh.glsl (dk_pica.c, fs_source).\n");
+    const char* p = pica_fsh_glsl;
+    int skipping = 0;
+    while (*p) {
+        const char* e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[512];
+        size_t cl = len < sizeof line - 1 ? len : sizeof line - 1;
+        memcpy(line, p, cl);
+        line[cl] = 0;
+        p += len + (e ? 1 : 0);
+        if (ez && strstr(line, "MSR-DEPTH-BEGIN")) { skipping = 1; continue; }
+        if (skipping) { if (strstr(line, "MSR-DEPTH-END")) skipping = 0; continue; }
+        if (strstr(line, "MSR-STRUCTURAL")) {
+            o += sprintf(o, "uint reg(uint id) {\n");
+            for (unsigned k = 0; k < n; k++) o += sprintf(o, "    if (id == 0x%Xu) return 0x%Xu;\n", (unsigned)regs[k], (unsigned)vals[k]);
+            o += sprintf(o, "    return dreg(id);\n}\n");
+        } else if (strstr(line, "MSR-WBUFFER")) {
+            o += sprintf(o, "bool wbuffer() { return %s; }\n", wbuf ? "true" : "false");
+        } else {
+            memcpy(o, p - len - (e ? 1 : 0), len);
+            o += len;
+            *o++ = '\n';
+        }
+    }
+    *o = 0;
+    return out;
+}
+
+static char* fs_source(int ez) {
+    u32 regs[64], vals[64], wbuf;
+    unsigned n = pica_fs_pairs(regs, vals, &wbuf);
+    return fs_source_from(regs, vals, n, wbuf, ez);
+}
+
+static void compile_thread(void* arg) {
+    (void)arg;
+    for (;;) {
+        mutexLock(&g_jmutex);
+        Job* j = 0;
+        for (;;) {
+            for (int k = 0; k < MAX_JOBS && !j; k++) if (g_jobs[k].state == JOB_QUEUED) j = &g_jobs[k];
+            if (j) break;
+            condvarWait(&g_jcond, &g_jmutex);
+        }
+        j->state = JOB_RUNNING;
+        mutexUnlock(&g_jmutex);
+        u64 t0 = armGetSystemTick();
+        char tmp[300], final[300];
+        snprintf(tmp, sizeof tmp, "%s/fs_%016llX.tmp", g_cache_dir, (unsigned long long)j->key);
+        snprintf(final, sizeof final, "%s/fs_%016llX.dksh", g_cache_dir, (unsigned long long)j->key);
+        int ok = msr_uam_compile_frag(j->glsl, tmp);
+        u8* data = 0;
+        long size = 0;
+        if (ok) {
+            remove(final);
+            rename(tmp, final);
+            FILE* f = fopen(final, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                size = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                data = size > 0 ? (u8*)malloc(size) : 0;
+                if (data && fread(data, 1, size, f) != (size_t)size) { free(data); data = 0; }
+                fclose(f);
+            }
+        }
+        u32 ms = (u32)(armTicksToNs(armGetSystemTick() - t0) / 1000000);
+        mutexLock(&g_jmutex);
+        free(j->glsl);
+        j->glsl = 0;
+        j->dksh = data;
+        j->size = (u32)size;
+        j->ms = ms;
+        j->state = data ? JOB_DONE : JOB_FAILED;
+        mutexUnlock(&g_jmutex);
+    }
+}
+
+// Finished compiles become usable shaders (on the drawing thread, which owns the code memory).
+static void fs_compile_poll(void) {
+    mutexLock(&g_jmutex);
+    for (int k = 0; k < MAX_JOBS; k++) {
+        Job* j = &g_jobs[k];
+        if (j->state == JOB_DONE) {
+            if (!rt_install(j->key, j->dksh, j->size)) {
+                if (g_nfailed < 256) g_failed[g_nfailed++] = j->key;
+                msr_receipt("gpu: compiled fragment shader %016llX did not fit; it uses the general one", (unsigned long long)j->key);
+            } else {
+                g_compiled++;
+                g_compile_ms += j->ms;
+                if (j->ms > g_compile_max_ms) g_compile_max_ms = j->ms;
+                msr_receipt("gpu: fragment shader %016llX compiled on the Switch in %u ms", (unsigned long long)j->key, j->ms);
+            }
+            free(j->dksh);
+            j->dksh = 0;
+            j->state = JOB_FREE;
+            g_jobs_live--;
+        } else if (j->state == JOB_FAILED) {
+            if (g_nfailed < 256) g_failed[g_nfailed++] = j->key;
+            msr_receipt("gpu: fragment shader %016llX failed to compile on the Switch; it uses the general one", (unsigned long long)j->key);
+            j->state = JOB_FREE;
+            g_jobs_live--;
+        }
+    }
+    mutexUnlock(&g_jmutex);
+}
+
+// 1: being compiled (the draw waits), 0: no compiler or it failed before (general shader).
+static int fs_compile_request(u64 key, int ez) {
+    if (!g_compiler_on) return 0;
+    for (unsigned k = 0; k < g_nfailed; k++) if (g_failed[k] == key) return 0;
+    mutexLock(&g_jmutex);
+    Job* free_j = 0;
+    for (int k = 0; k < MAX_JOBS; k++) {
+        Job* j = &g_jobs[k];
+        if (j->state != JOB_FREE && j->key == key) { mutexUnlock(&g_jmutex); return 1; }
+        if (j->state == JOB_FREE && !free_j) free_j = j;
+    }
+    if (!free_j) { mutexUnlock(&g_jmutex); return 1; }   // queue full: wait a frame and ask again
+    char* src = fs_source(ez);
+    if (!src) { mutexUnlock(&g_jmutex); return 0; }
+    free_j->key = key;
+    free_j->glsl = src;
+    free_j->state = JOB_QUEUED;
+    g_jobs_live++;
+    condvarWakeOne(&g_jcond);
+    mutexUnlock(&g_jmutex);
+    return 1;
+}
+
+// Start-up: the compiled shaders already on the SD card, and the compiler thread.
+void dkr_compiler_init(const char* cache_dir) {
+    snprintf(g_cache_dir, sizeof g_cache_dir, "%s", cache_dir);
+    mkdir(cache_dir, 0777);
+    DkMemBlockMaker mm;
+    dkMemBlockMakerDefaults(&mm, g_dev, RT_CODE_SIZE);
+    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+    g_rt_code = dkMemBlockCreate(&mm);
+    DIR* d = opendir(cache_dir);
+    if (d) {
+        struct dirent* e;
+        while ((e = readdir(d)) != 0) {
+            const char* nm = e->d_name;
+            if (strncmp(nm, "fs_", 3) || strlen(nm) != 3 + 16 + 5 || strcmp(nm + 19, ".dksh")) continue;
+            u64 key = strtoull(nm + 3, 0, 16);
+            if (pack_find(key) || rt_find(key)) continue;
+            char path[300];
+            snprintf(path, sizeof path, "%s/%s", cache_dir, nm);
+            FILE* f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            u8* data = size > 0 && size < (1 << 20) ? (u8*)malloc(size) : 0;
+            if (data && fread(data, 1, size, f) == (size_t)size && rt_install(key, data, (u32)size)) g_cache_loaded++;
+            free(data);
+            fclose(f);
+        }
+        closedir(d);
+    }
+    mutexInit(&g_jmutex);
+    condvarInit(&g_jcond);
+    Result rc = threadCreate(&g_cthread, compile_thread, 0, 0, 4u << 20, 0x2C, 2);
+    if (R_SUCCEEDED(rc)) rc = threadStart(&g_cthread);
+    g_compiler_on = R_SUCCEEDED(rc);
+    msr_receipt("gpu: %u compiled fragment shaders loaded from %s; compiling on the Switch %s",
+                g_cache_loaded, cache_dir, g_compiler_on ? "is on" : "could not start");
+}
+
+void dkr_compile_stats(unsigned* compiled, unsigned* avg_ms, unsigned* max_ms, unsigned* pending) {
+    *compiled = g_compiled;
+    *avg_ms = g_compiled ? g_compile_ms / g_compiled : 0;
+    *max_ms = g_compile_max_ms;
+    *pending = g_jobs_live;
+}
 
 void dkr_vs_stats(unsigned* hits, unsigned* misses) { *hits = g_vs_hits; *misses = g_vs_misses; g_vs_hits = g_vs_misses = 0; }
 
@@ -1229,9 +1475,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
                                              vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size};
-    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size + pica_fsh_test8_dksh_size;
+    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
-    u32 code_size = ((all + (4 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+    u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
     dkMemBlockMakerDefaults(&mm, dev, code_size);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
     g_code = dkMemBlockCreate(&mm);
@@ -1239,7 +1485,6 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     shader_load(&g_vsh, pica_vsh_dksh, pica_vsh_dksh_size, &co);
     shader_load(&g_fsh, pica_fsh_dksh, pica_fsh_dksh_size, &co);
     shader_load(&g_test_vsh, selftest_vsh_dksh, selftest_vsh_dksh_size, &co);
-    shader_load(&g_fsh_test8, pica_fsh_test8_dksh, pica_fsh_test8_dksh_size, &co);
     for (int k = 0; k < K_COUNT; k++) shader_load(&g_k[k], kcode[k], ksize[k], &co);
 
     // the GPU's copy of VRAM, empty like the guest's at boot. (dkr_init runs before the guest
@@ -1300,9 +1545,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
 
 // ---- self-test: the general fragment shader against the pack's, on this GPU ----------------------
 // Each fragment configuration the pack was made from (records as in fs_new.bin, built into msr.nro)
-// is drawn three times over a 64x64 target with the same inputs: with the pack's shader for it,
-// with the general shader, and with the general shader of test builds 7 and 8. The general shaders
-// should give the pack's picture; the receipt says where they do not.
+// is drawn over a 64x64 target with the same inputs: with the pack's shader for it and with the
+// general shader; the first few are also specialized and compiled here on the Switch (as for a
+// configuration missing from the pack) and drawn with that. Both should give the pack's picture.
 int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
 static u32 st_rand(u32* x) { *x ^= *x << 13; *x ^= *x >> 17; *x ^= *x << 5; return *x; }
 
@@ -1348,7 +1593,7 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
         dkCmdBufCopyBufferToImage(g_cmd, &lb, &v, &lr, 0);
         g_lut_uploaded = ~0u;   // the game's tables go in at its first draw
     }
-    unsigned tested = 0, diff_new = 0, diff_old = 0, worst_n = 0, lines = 0;
+    unsigned tested = 0, diff_new = 0, diff_old = 0, worst_n = 0, lines = 0, n_comp = 0;
     u64 worst_key = 0;
     static u8 worst[S * NI * S * 3];
     size_t pos = 0;
@@ -1411,7 +1656,31 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
         dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
         DkScissor sc = {0, 0, S, S};
         dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
-        const DkShader* fsh[NI] = {packed, &g_fsh, &g_fsh_test8};
+        const DkShader* compiled = 0;
+        u32 cms = 0;
+        if (g_compiler_on && n_comp < 4) {
+            u32 regs[64], vals[64];
+            unsigned np = 0;
+            for (u32 k = 0; k < h[3] && np < 64; k++) { u32 rv[2]; memcpy(rv, pairs + 8 * k, 8); regs[np] = rv[0]; vals[np] = rv[1]; np++; }
+            char* src = fs_source_from(regs, vals, np, wbuf, 0);
+            char path[300];
+            snprintf(path, sizeof path, "%s/selftest.dksh", g_cache_dir);
+            u64 t0 = armGetSystemTick();
+            int ok = src && msr_uam_compile_frag(src, path);
+            cms = (u32)(armTicksToNs(armGetSystemTick() - t0) / 1000000);
+            free(src);
+            FILE* f = ok ? fopen(path, "rb") : 0;
+            if (f) {
+                static u8 buf[1 << 20];
+                size_t sz = fread(buf, 1, sizeof buf, f);
+                fclose(f);
+                if (rt_install(~0ull - n_comp, buf, (u32)sz)) compiled = &g_rt[g_rt_n - 1].sh;
+            }
+            remove(path);
+            n_comp++;
+            if (!compiled) msr_receipt("fs self-test: %016llX could not be compiled on the Switch", (unsigned long long)key);
+        }
+        const DkShader* fsh[NI] = {packed, &g_fsh, compiled ? compiled : &g_fsh};
         for (int k = 0; k < NI; k++) {
             DkImageView cv;
             dkImageViewDefaults(&cv, &rt[k]);
@@ -1442,11 +1711,12 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
             }
         tested++;
         if (nd[1]) diff_new++;
-        if (nd[2]) diff_old++;
-        if ((nd[1] || nd[2]) && lines++ < 24)
-            msr_receipt("fs self-test: %016llX%s: general shader differs at %u of %u pixels (most %u); test 8's at %u (most %u)",
-                        (unsigned long long)key, wbuf ? " (w-buffer)" : "", nd[1], S * S, md[1], nd[2], md[2]);
-        unsigned score = nd[1] > nd[2] ? nd[1] : nd[2];
+        if (compiled) {
+            if (nd[2]) diff_old++;
+            msr_receipt("fs self-test: %016llX compiled on the Switch in %u ms: differs from the pack's at %u of %u pixels (most %u)",
+                        (unsigned long long)key, cms, nd[2], S * S, md[2]);
+        }
+        unsigned score = compiled ? nd[2] * 2 + 1 : 0;
         if (score > worst_n || tested == 1) {   // the first one is pictured even when all match
             worst_n = score;
             worst_key = key;
@@ -1456,11 +1726,11 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
                         for (int c = 0; c < 3; c++) worst[(y * S * NI + k * S + x) * 3 + c] = px[k * S * S * 4 + (y * S + x) * 4 + c];
         }
     }
-    msr_receipt("fs self-test: %u configurations drawn with the pack's shader and the general ones: the general shader differs in %u, test 8's general shader in %u",
-                tested, diff_new, diff_old);
+    msr_receipt("fs self-test: %u configurations drawn with the pack's shader and the general one: the general one differs in %u; %u compiled on the Switch, %u of them differ",
+                tested, diff_new, n_comp, diff_old);
     if (tested && png_path) {
         msr_write_png(png_path, worst, S * NI, S);
-        msr_receipt("fs self-test: %016llX pictured in %s (pack's, general, test 8's general)", (unsigned long long)worst_key, png_path);
+        msr_receipt("fs self-test: %016llX pictured in %s (pack's, general, compiled on the Switch)", (unsigned long long)worst_key, png_path);
     }
     g_bound_color = g_bound_depth = 0;
     g_img_pos = g_img_floor;   // the test's images are free again

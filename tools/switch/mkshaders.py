@@ -39,8 +39,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     jobs = [('pica_vsh', 'vert', os.path.join(R, 'gpu/dk/pica_vsh.glsl')),
             ('pica_fsh', 'frag', os.path.join(R, 'gpu/dk/pica_fsh.glsl')),
-            ('selftest_vsh', 'vert', os.path.join(R, 'gpu/dk/test/selftest_vsh.glsl')),
-            ('pica_fsh_test8', 'frag', os.path.join(R, 'gpu/dk/test/pica_fsh_test8.glsl'))]
+            ('selftest_vsh', 'vert', os.path.join(R, 'gpu/dk/test/selftest_vsh.glsl'))]
     inc = open(os.path.join(R, 'gpu/dk/vram_ops.inc')).read()
     for k in KERNELS:
         src = os.path.join(out_dir, 'vram_%s.glsl' % k)
@@ -53,6 +52,10 @@ def main():
         d = open(dksh, 'rb').read()
         out.append('static const uint8_t %s_dksh[] __attribute__((aligned(256))) = {%s};' % (name, ','.join(str(b) for b in d)))
         out.append('static const uint32_t %s_dksh_size = %d;' % (name, len(d)))
+    # the general fragment shader's source too: the Switch build specializes and compiles it for
+    # configurations missing from the pack (dk_pica.c, fs_compile)
+    src = open(os.path.join(R, 'gpu/dk/pica_fsh.glsl'), 'rb').read() + b'\0'
+    out.append('static const char pica_fsh_glsl[] = {%s};' % ','.join(str(b) for b in src))
     open(os.path.join(out_dir, 'dk_shaders.h'), 'w').write('\n'.join(out) + '\n')
     print('%d shaders' % len(jobs))
 

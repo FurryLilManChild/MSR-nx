@@ -26,8 +26,11 @@ if [ "$1" = "link" ]; then
     aarch64-none-elf-gcc $ARCH -c nxout/fsrec_blob.S -o nxout/fsrec_blob.o
     PACKOBJ="$PACKOBJ nxout/fsrec_blob.o"
   fi
-  aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test9" nxout/msr.nacp
+  # the shader compiler (tools/switch/uam/build.sh puts libuam.a in the build folder)
+  UAMLIB=""
+  if [ -f libuam.a ]; then UAMLIB="libuam.a"; fi
+  aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ $UAMLIB -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm -lstdc++
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test10" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi

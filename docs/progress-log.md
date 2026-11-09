@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-09 (midday): test 9, shaders compiled on the Switch
+
+- Test 9: no white-out in a new area, but the start-up self-test answered the question: the general
+  fragment shader differs from the pack's in 84 of 93 configurations, the rewritten one exactly as
+  much as test 8's. Local memory was not the cause; the general shader is wrong on the Switch GPU
+  for reasons still unknown. With every shader in the pack the game holds 30 pictures per second at
+  handheld clocks; the slow spots are configurations missing from the pack.
+- Test 10: uam (devkitPro's deko3d shader compiler, pinned in tools/switch/uam/build.sh) is built for
+  the Switch and linked in (about 2.3 MB). A missing fragment configuration is specialized on the
+  Switch exactly as fsgen.py does (checked byte for byte on the host), compiled on a worker thread,
+  and saved to sdmc:/switch/msr/shadercache, which is loaded at start. Its draws sit out until the
+  shader is ready; the general shader is only a fallback if a compile fails. The self-test now also
+  compiles four pack configurations on the Switch and compares them with the pack's. 112 fragment
+  configurations in the pack (19 from run009).
+
 ## 2026-11-09 (afternoon): test 8, white-out traced to the general fragment shader
 
 - Test 8: the white-out came back in new areas; the build's own detector caught it and saved a
