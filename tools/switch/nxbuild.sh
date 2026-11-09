@@ -7,7 +7,7 @@ cd /w
 mkdir -p nxrt nxout
 ARCH="-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE"
 CFLAGS="-O2 $ARCH -ffunction-sections -fdata-sections -fno-strict-aliasing -ffp-contract=off -Wall -Wno-unused -Wno-format-truncation -D__SWITCH__ -I$DEVKITPRO/libnx/include -I/r/cpu -I/r/os -I/r/gpu -Inxout"
-for f in cpu/dispatch.c os/log.c os/mem.c os/svc.c os/kernel.c os/boot.c os/hle_apt.c os/hle_hid_gsp.c os/hle_fs_cfg.c os/sched.c os/hle_dsp.c os/dsp_audio.c gpu/pica_cmd.c gpu/pica_shader.c gpu/sw_raster.c gpu/sw_light.c gpu/frame_plan.c gpu/dk/dk_pica.c switch/main_nx.c; do
+for f in cpu/dispatch.c os/log.c os/mem.c os/svc.c os/kernel.c os/boot.c os/hle_apt.c os/hle_hid_gsp.c os/hle_fs_cfg.c os/sched.c os/hle_dsp.c os/dsp_audio.c os/audio_stretch.c gpu/pica_cmd.c gpu/pica_shader.c gpu/sw_raster.c gpu/sw_light.c gpu/frame_plan.c gpu/dk/dk_pica.c switch/main_nx.c; do
   if [ "$f" = "gpu/dk/dk_pica.c" ]; then while [ ! -f nxout/dk_shaders.h ]; do sleep 1; done; fi
   aarch64-none-elf-gcc $CFLAGS -c /r/$f -o nxrt/$(basename $f .c).o
 done

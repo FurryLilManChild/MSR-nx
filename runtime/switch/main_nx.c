@@ -13,6 +13,7 @@
 #include <switch.h>
 #include "boot.h"
 #include "frame_plan.h"
+#include "audio_stretch.h"
 #include "msr_cpu.h"
 #include "msr_log.h"
 #include "msr_mem.h"
@@ -233,26 +234,14 @@ static void* audio_thread(void* arg) {
         g_abuf[k].data_offset = 0;
         audoutAppendAudioOutBuffer(&g_abuf[k]);
     }
-    double pos = 0;   // read position in DSP samples
+    stretch_reset();
     for (;;) {
         AudioOutBuffer* done = 0;
         u32 n = 0;
         audoutWaitPlayFinish(&done, &n, UINT64_MAX);
         if (!done) continue;
-        s16* d = (s16*)done->buffer;
-        u32 w = msr_audio_write;
-        // keep about two buffers of latency; jump if far behind or ahead
-        double lag = (double)w - pos;
-        if (lag > 16384 || lag < 0) pos = w > 3000 ? w - 3000 : 0;
-        double step = 32728.0 / 48000.0;
-        for (int i = 0; i < AUD_SAMPLES; i++) {
-            u32 p = (u32)pos;
-            if (p >= w) { d[2 * i] = d[2 * i + 1] = 0; continue; }   // starved: silence
-            u32 q = p % RING;
-            d[2 * i] = msr_audio_ring[2 * q];
-            d[2 * i + 1] = msr_audio_ring[2 * q + 1];
-            pos += step;
-        }
+        // stretched to the game's speed (no crackle in slowdowns), then resampled to 48 kHz
+        stretch_fill((s16*)done->buffer, AUD_SAMPLES, 48000.0, msr_audio_ring, RING, msr_audio_write);
         audoutAppendAudioOutBuffer(done);
     }
     return 0;
