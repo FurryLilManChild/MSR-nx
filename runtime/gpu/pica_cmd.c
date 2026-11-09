@@ -64,6 +64,8 @@ int (*pica_draw_hook)(int indexed);
 void (*pica_sync_hook)(u32 vaddr, u32 size);
 void (*pica_invalidate_hook)(u32 vaddr, u32 size);
 void (*pica_fill_hook)(u32 start, u32 end, u32 value, u32 width);
+int (*pica_gx_hook)(int op, const u32* d);
+void (*pica_latch_hook)(int screen);
 unsigned pica_program_version;
 
 void pica_load_attributes(u32 index, Vec4* in) {
@@ -108,6 +110,80 @@ void pica_load_attributes(u32 index, Vec4* in) {
     for (u32 a = 0; a < count && a < 12; a++) in[(perm >> (4 * a)) & 0xF] = attr[a];
 }
 
+// Where each shader input comes from, for a renderer that fetches vertices itself (the Switch GPU
+// reads the game's vertex bytes and decodes them in the vertex shader). Vertex lo of the draw is
+// vertex 0 of the copied data; every loader's bytes for vertices lo .. lo + count - 1 are copied to
+// one buffer, loader by loader, each starting on a 4-byte boundary. Same rules as
+// pica_load_attributes above (the probe checks the two agree: MSR_VFETCH_CHECK).
+int pica_vertex_layout(u32 lo, u32 count, PicaAttrSrc* in, PicaLoaderCopy* copies, u32* ncopies, u32* total) {
+    const u32* r = g_pica.reg;
+    u32 base = r[0x200] << 3;
+    u64 fmt = (u64)r[0x201] | ((u64)(r[0x202] & 0xFFFF) << 32);
+    u32 fixed_mask = (r[0x202] >> 16) & 0xFFF;
+    u32 nattr = (r[0x202] >> 28) + 1;
+    PicaAttrSrc attr[12];
+    memset(attr, 0, sizeof attr);
+    for (u32 a = 0; a < nattr && a < 12; a++)
+        if (fixed_mask & (1u << a)) { attr[a].mode = 1; attr[a].fixed = g_pica.fixed_attr[a]; }
+    u32 pos_out = 0;
+    *ncopies = 0;
+    for (int l = 0; l < 12; l++) {
+        u32 off = r[0x203 + 3 * l], c1 = r[0x204 + 3 * l], c2 = r[0x205 + 3 * l];
+        u32 n = c2 >> 28, stride = (c2 >> 16) & 0xFF;
+        if (!n) continue;
+        u32 src = pica_vaddr(base + off + lo * stride);
+        if (!src) continue;
+        u32 bytes = count * stride;
+        if (bytes < 64) bytes = 64;   // a stride of 0 still reads one vertex's worth
+        PicaLoaderCopy* cp = &copies[(*ncopies)++];
+        cp->src = src;
+        cp->bytes = bytes;
+        cp->dst = pos_out;
+        u32 pos = 0;
+        for (u32 k = 0; k < n; k++) {
+            u32 id = k < 8 ? (c1 >> (4 * k)) & 0xF : (c2 >> (4 * (k - 8))) & 0xF;
+            if (id >= 12) { pos += 4 * (id - 11); continue; }
+            u32 f = (u32)(fmt >> (4 * id)) & 0xF, type = f & 3, comps = (f >> 2) + 1;
+            u32 sz = k_attr_size[type];
+            pos = (pos + sz - 1) & ~(sz - 1);
+            if (!(fixed_mask & (1u << id))) {
+                attr[id].mode = 2;
+                attr[id].offset = pos_out + pos;
+                attr[id].stride = stride;
+                attr[id].type = type;
+                attr[id].comps = comps;
+            }
+            pos += comps * sz;
+        }
+        pos_out = (pos_out + bytes + 3) & ~3u;
+    }
+    for (u32 k = 0; k < 16; k++) { memset(&in[k], 0, sizeof in[k]); in[k].fixed = (Vec4){0, 0, 0, 1}; }
+    u64 perm = (u64)r[0x2BB] | ((u64)r[0x2BC] << 32);
+    for (u32 a = 0; a < nattr && a < 12; a++) in[(perm >> (4 * a)) & 0xF] = attr[a];
+    *total = pos_out;
+    return 1;
+}
+
+// What the vertex shader does with that layout (pica_vsh.glsl and the translated shaders,
+// fetch_attr), for the probe's check.
+Vec4 pica_fetch_attr(const PicaAttrSrc* s, const u8* data, u32 vid) {
+    Vec4 v = {0, 0, 0, 1};
+    if (s->mode == 1) return s->fixed;
+    if (s->mode != 2) return v;
+    float* c = &v.x;
+    u32 a = s->offset + vid * s->stride, sz = k_attr_size[s->type];
+    for (u32 k = 0; k < s->comps; k++) {
+        const u8* q = data + a + k * sz;
+        switch (s->type) {
+        case 0: c[k] = (float)(s8)q[0]; break;
+        case 1: c[k] = (float)q[0]; break;
+        case 2: { s16 t; memcpy(&t, q, 2); c[k] = (float)t; break; }
+        case 3: { float t; memcpy(&t, q, 4); c[k] = t; break; }
+        }
+    }
+    return v;
+}
+
 #define MAX_DRAW 65536
 static PicaVertex g_verts[MAX_DRAW];
 static PicaVertex g_tris[MAX_DRAW * 3];
@@ -144,6 +220,52 @@ static void assemble_and_draw(const PicaVertex* v, unsigned n) {
         }
     }
     if (t) pica_draw_triangles(g_tris, t);
+}
+
+// MSR_VFETCH_CHECK: compares the renderer-side vertex fetch (pica_vertex_layout + pica_fetch_attr)
+// with pica_load_attributes on every draw.
+static int g_vfc = -1;
+static unsigned long long g_vfc_checked, g_vfc_bad, g_vfc_draws;
+static void vfetch_check(int indexed) {
+    const u32* r = g_pica.reg;
+    u32 n = r[0x228], first = r[0x22A], lo = first, hi = first + n - 1;
+    if (!n) return;
+    if (indexed) {
+        u32 ib = r[0x227];
+        const u8* idx = pica_ptr((r[0x200] << 3) + (ib & 0x0FFFFFFF));
+        if (!idx) return;
+        int wide = (ib >> 31) & 1;
+        lo = ~0u; hi = 0;
+        for (u32 i = 0; i < n; i++) {
+            u32 v; if (wide) { u16 t; memcpy(&t, idx + 2 * i, 2); v = t; } else v = idx[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+    }
+    u32 count = hi - lo + 1;
+    if (count > 65536) return;
+    static PicaAttrSrc src[16];
+    static PicaLoaderCopy cp[12];
+    static u8 data[65536 * 64 + 4096];
+    u32 nc, total;
+    pica_vertex_layout(lo, count, src, cp, &nc, &total);
+    if (total > sizeof data) return;
+    for (u32 k = 0; k < nc; k++) memcpy(data + cp[k].dst, g_mem + cp[k].src, cp[k].bytes);
+    g_vfc_draws++;
+    for (u32 i = 0; i < count; i += (count > 64 ? count / 64 : 1)) {
+        Vec4 ref[16];
+        for (int k = 0; k < 16; k++) ref[k] = (Vec4){0, 0, 0, 1};
+        pica_load_attributes(lo + i, ref);
+        for (int k = 0; k < 16; k++) {
+            Vec4 g = pica_fetch_attr(&src[k], data, i);
+            g_vfc_checked++;
+            if (memcmp(&g, &ref[k], sizeof g)) {
+                if (g_vfc_bad++ < 10)
+                    msr_receipt("vfetch check: input %d vertex %u: %g %g %g %g vs %g %g %g %g (mode %u)", k, lo + i, g.x, g.y, g.z, g.w,
+                                ref[k].x, ref[k].y, ref[k].z, ref[k].w, src[k].mode);
+            }
+        }
+    }
 }
 
 // MSR_VTIME: measures the CPU cost of the GPU renderer's vertex fetch (every vertex a draw uses,
@@ -339,6 +461,7 @@ static void rt_stats(void) {
     if (any) pica_stat_rtt_draws++;
 }
 void pica_rt_summary(void) {
+    if (g_vfc > 0) msr_receipt("vfetch check: %llu draws, %llu inputs compared, %llu differ", g_vfc_draws, g_vfc_checked, g_vfc_bad);
     msr_receipt("frame plan: %u of %u GPU operations skipped (they fed no shown screen)", fp_skipped_ops, fp_total_ops);
     if (pica_vtime > 0)
         msr_receipt("vertex fetch: %llu vertices decoded in %.1f ms of CPU time", g_vtime_verts, g_vtime_ns / 1e6);
@@ -402,6 +525,8 @@ static void draw(int indexed) {
       } }
     if (pica_vtime < 0) pica_vtime = getenv("MSR_VTIME") ? 1 : 0;
     if (pica_vtime) vtime_draw(indexed);
+    if (g_vfc < 0) g_vfc = getenv("MSR_VFETCH_CHECK") ? 1 : 0;
+    if (g_vfc) vfetch_check(indexed);
     if (pica_draw_hook && pica_draw_hook(indexed)) { g_pica.vertices += n; if (indexed) g_pica.draws_indexed++; return; }
     if (indexed) g_pica.draws_indexed++;
     g_pica.vertices += n;

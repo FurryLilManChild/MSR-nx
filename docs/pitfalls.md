@@ -35,3 +35,7 @@
   project preferences before designing any test. Tests cycle their settings inside one launch, save
   their own pictures and write each run into its own switchlogs folder.
 - Building a test before Mark's go-ahead (test 3 and the first test 4).
+- Saying "I'll work overnight" and ending the turn: nothing happens between messages. Keep the turn
+  running (with status messages) or schedule a wake-up; never promise unattended work otherwise.
+- uam replaces non-constant integer division with float math that can be off by one; GPU kernels use
+  udiv() (float estimate, then corrected) or shifts.

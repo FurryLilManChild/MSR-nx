@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-09 (morning): VRAM on the GPU, vertex fetch on the GPU
+
+- The 3DS VRAM lives in Switch GPU memory. Fills, display transfers, texture copies, DMA into VRAM,
+  render target stores and loads, texture decoding from VRAM and the screen conversion run as
+  compute shaders from runtime/gpu/dk/vram_ops.inc. tools/tests/vram_ops_test.cpp runs the same
+  source on the CPU against the reference code: all cases byte-identical (every transfer format and
+  mode, all 14 texture formats, the game's own parameter sets).
+- Vertex fetch: pica_vertex_layout gives each shader input's loader, offset, type and size; the
+  game's vertex bytes are copied as they are and decoded in the vertex shader. Probe check
+  (MSR_VFETCH_CHECK) over 200 s: 504804 draws, 359 million inputs, no difference.
+
 ## 2026-11-08 (night): tests 4 and 5, right eye skipped
 
 - Test 4 (one launch cycling four shader modes, pictures saved by the build): mode 1 (translated

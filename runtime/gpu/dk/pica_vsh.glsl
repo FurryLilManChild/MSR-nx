@@ -4,15 +4,40 @@
 #version 460
 
 layout (std430, binding = 0) readonly buffer Program { uint code[4096]; uint swz[128]; };
-layout (std430, binding = 1) readonly buffer Vertices { vec4 vin[]; };   // base.y inputs per vertex
+layout (std430, binding = 1) readonly buffer Vertices { uint vraw[]; };   // the game's vertex bytes
 
 layout (std140, binding = 0) uniform VertexState {
     vec4 f[96];          // float uniforms c0..c95
     uvec4 ints[4];       // i0..i3: x count, y start, z step
     uvec4 cfg;           // x bools, y entry point, z output mask, w output total
     uvec4 outmap[7];     // GPUREG_SH_OUTMAP_O0..6 (x)
-    uvec4 base;          // x first vertex slot in Vertices, y vec4s per vertex
+    uvec4 base;          // unused (was the old vertex buffer layout)
+    uvec4 attr[16];      // per input: x 0 default, 1 fixed, 2 loaded; y byte offset; z stride; w type | comps << 4
+    vec4 fixd[16];       // fixed values
 };
+
+// Vertex inputs, fetched and decoded here from the game's own vertex bytes (pica_cmd.c
+// pica_vertex_layout says where each input lives; pica_fetch_attr is the same code on the CPU).
+uint vbyte(uint a) { return (vraw[a >> 2u] >> ((a & 3u) * 8u)) & 0xFFu; }
+vec4 fetch_attr(uint reg) {
+    uvec4 t = attr[reg];
+    if (t.x == 1u) return fixd[reg];
+    vec4 v = vec4(0.0, 0.0, 0.0, 1.0);
+    if (t.x != 2u) return v;
+    uint type = t.w & 3u, comps = t.w >> 4u;
+    uint sz = type == 3u ? 4u : type == 2u ? 2u : 1u;
+    uint a = t.y + uint(gl_VertexID) * t.z;
+    for (uint c = 0u; c < comps; c++) {
+        uint p = a + c * sz;
+        float x;
+        if (type == 0u) x = float(int(vbyte(p) << 24u) >> 24);
+        else if (type == 1u) x = float(vbyte(p));
+        else if (type == 2u) x = float(int((vbyte(p) | (vbyte(p + 1u) << 8u)) << 16u) >> 16);
+        else x = uintBitsToFloat(vbyte(p) | (vbyte(p + 1u) << 8u) | (vbyte(p + 2u) << 16u) | (vbyte(p + 3u) << 24u));
+        if (c == 0u) v.x = x; else if (c == 1u) v.y = x; else if (c == 2u) v.z = x; else v.w = x;
+    }
+    return v;
+}
 
 layout (location = 0) out vec4 v_color;
 layout (location = 1) out vec4 v_uv01;
@@ -22,6 +47,7 @@ layout (location = 4) out vec4 v_view;
 
 vec4 r[16];
 vec4 o[16];
+vec4 vin_cache[16];
 int a0x, a0y, aL;
 bool cx, cy;
 
@@ -34,7 +60,7 @@ float smul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }
 
 vec4 src(uint reg, uint rel, uint sel, bool neg) {
     vec4 v;
-    if (reg < 16u) v = reg < base.y ? vin[(base.x + uint(gl_VertexID)) * base.y + reg] : vec4(0.0, 0.0, 0.0, 1.0);
+    if (reg < 16u) v = vin_cache[reg];
     else if (reg < 32u) v = r[reg - 16u];
     else {
         int i = int(reg) - 32;
@@ -83,7 +109,7 @@ bool flowcond(uint w) {
 bool boolu(uint w) { return ((cfg.x >> ((w >> 22) & 15u)) & 1u) != 0u; }
 
 void main() {
-    for (int k = 0; k < 16; k++) { o[k] = vec4(0.0, 0.0, 0.0, 1.0); r[k] = vec4(0.0); }
+    for (int k = 0; k < 16; k++) { o[k] = vec4(0.0, 0.0, 0.0, 1.0); r[k] = vec4(0.0); vin_cache[k] = fetch_attr(uint(k)); }
     a0x = 0; a0y = 0; aL = 0; cx = false; cy = false;
     uint sfinal[8], sret[8], srep[8], sinc[8], sloop[8];
     bool sisloop[8];

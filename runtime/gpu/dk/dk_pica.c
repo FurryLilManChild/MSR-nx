@@ -6,10 +6,12 @@
 // (textures, lighting, combiners, alpha test, PICA depth) runs in pica_fsh.glsl. Fixed-function
 // state (blending, depth, stencil, culling, viewport, scissor) maps to deko3d state.
 //
-// Render targets live on the GPU as images that mirror the guest memory the game points them at;
-// a surface the GPU drew is copied back (and tiled the PICA way) before the CPU side reads that
-// memory (display transfers, texture copies, DMA, textures), and guest memory the CPU side wrote
-// is uploaded again before the GPU draws into it.
+// The 3DS's VRAM (6 MiB at 0x1F000000) lives in Switch GPU memory, and the GX operations on it
+// (fills, display transfers, texture copies) run there as compute shaders (vram_ops.inc), so the
+// game's pictures never leave the GPU: render targets are images stored to and loaded from that
+// copy of VRAM, textures in VRAM are decoded from it, and the screens are converted from it. The
+// CPU's copy of VRAM (g_mem) is brought up to date only when the CPU side reads it. Render targets
+// and textures outside VRAM keep the older CPU path (readback to and upload from guest memory).
 #include <deko3d.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -24,7 +26,7 @@
 #define IMG_SIZE (128u << 20)
 #define CMD_SIZE (8u << 20)
 #define SURF_REGION (64u << 20)
-#define VS_UBO_SIZE 0x800u
+#define VS_UBO_SIZE 0xA00u
 #define FS_UBO_SIZE 0x600u
 
 static DkDevice g_dev;
@@ -146,8 +148,99 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
     }
 }
 
+// ---- VRAM on the GPU ---------------------------------------------------------------------------------
+
+#define VRAM_BASE 0x1F000000u
+#define VRAM_SIZE (6u << 20)
+#define VRAM_PAGES (VRAM_SIZE >> 12)
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_COUNT };
+static DkMemBlock g_vram;
+static DkGpuAddr g_vram_gpu;
+static DkShader g_k[K_COUNT];
+static u32 g_vram_ver[VRAM_PAGES];   // bumped whenever the GPU's VRAM page changes (textures recheck)
+static u8 g_cpu_stale[VRAM_PAGES];   // the GPU changed the page after the CPU's copy was taken
+static u32 g_vram_tick;
+static unsigned g_vram_ops[K_COUNT];
+
+static int in_vram(u32 a, u32 n) { return a >= VRAM_BASE && n <= VRAM_SIZE && a - VRAM_BASE <= VRAM_SIZE - n; }
+
+static void vram_touch(u32 a, u32 n) {   // the GPU wrote [a, a + n) of VRAM
+    if (!n) return;
+    g_vram_tick++;
+    for (u32 p = (a - VRAM_BASE) >> 12; p <= (a - VRAM_BASE + n - 1) >> 12 && p < VRAM_PAGES; p++) {
+        g_vram_ver[p] = g_vram_tick;
+        g_cpu_stale[p] = 1;
+    }
+}
+
+static u32 vram_version(u32 a, u32 n) {
+    u32 v = 0;
+    for (u32 p = (a - VRAM_BASE) >> 12; p <= (a - VRAM_BASE + n - 1) >> 12 && p < VRAM_PAGES; p++)
+        if (g_vram_ver[p] > v) v = g_vram_ver[p];
+    return v;
+}
+
+// A barrier between steps that hand data to each other through memory or images.
+static void gpu_barrier(void) {
+    dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_L2Cache);
+}
+
+// Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
+static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkImage* dst) {
+    if (!n) return;
+    g_vram_ops[k]++;
+    gpu_barrier();   // what earlier draws and kernels wrote is visible
+    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1000;   // after the draw uniforms
+    dkCmdBufPushConstants(g_cmd, ubo, 64, 0, 64, q);
+    DkBufExtents ub = {ubo, 64};
+    dkCmdBufBindUniformBuffers(g_cmd, DkStage_Compute, 0, &ub, 1);
+    DkBufExtents sb[2] = {{g_vram_gpu, VRAM_SIZE}, {g_vram_gpu, VRAM_SIZE}};
+    dkCmdBufBindStorageBuffers(g_cmd, DkStage_Compute, 0, sb, 2);
+    if (src || dst) {
+        u32 doff = dyn_alloc(sizeof(DkImageDescriptor) + sizeof(DkSamplerDescriptor), 64);
+        DkImageDescriptor* id = (DkImageDescriptor*)(g_dyn_cpu + doff);
+        DkSamplerDescriptor* sd = (DkSamplerDescriptor*)(g_dyn_cpu + doff + sizeof(DkImageDescriptor));
+        DkImageView iv;
+        dkImageViewDefaults(&iv, src ? src : dst);
+        dkImageDescriptorInitialize(id, &iv, false, false);
+        DkSampler smp;
+        dkSamplerDefaults(&smp);
+        dkSamplerDescriptorInitialize(sd, &smp);
+        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 1);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + sizeof(DkImageDescriptor), 1);
+        if (src) {
+            DkResHandle th = dkMakeTextureHandle(0, 0);
+            dkCmdBufBindTextures(g_cmd, DkStage_Compute, 0, &th, 1);
+        } else {
+            DkResHandle ih = dkMakeImageHandle(0);
+            dkCmdBufBindImages(g_cmd, DkStage_Compute, 0, &ih, 1);
+        }
+    }
+    DkShader const* sh = &g_k[k];
+    dkCmdBufBindShaders(g_cmd, DkStageFlag_Compute, &sh, 1);
+    dkCmdBufDispatchCompute(g_cmd, (n + 63) / 64, 1, 1);
+    gpu_barrier();
+}
+
+// The CPU wrote guest VRAM [a, a + n): send it to the GPU's copy, in order with queued work.
+static void vram_upload(u32 a, u32 n) {
+    while (n) {
+        u32 chunk = n > (4u << 20) ? (4u << 20) : n;
+        u32 off = dyn_alloc((chunk + 3) & ~3u, 256);
+        memcpy(g_dyn_cpu + off, g_mem + a, chunk);
+        dkCmdBufCopyBuffer(g_cmd, g_dyn_gpu + off, g_vram_gpu + (a - VRAM_BASE), chunk);
+        a += chunk;
+        n -= chunk;
+    }
+    gpu_barrier();
+}
+
+static void surf_store(Surf* s);
+static void surf_load(Surf* s);
+
 static void surf_upload(Surf* s) {
     if (s->depth) { s->cpu_dirty = 0; return; }   // depth only ever comes from clears
+    if (in_vram(s->addr, s->bytes)) { surf_load(s); return; }
     MSR_PERF_BEGIN(PERF_SURF_UPLOAD);
     u32 off = dyn_alloc(s->w * s->h * 4, 256);
     u8* dst = g_dyn_cpu + off;
@@ -169,6 +262,7 @@ static void surf_upload(Surf* s) {
 
 static void surf_readback(Surf* s) {
     if (s->depth || !s->gpu_dirty) { s->gpu_dirty = 0; return; }
+    if (in_vram(s->addr, s->bytes)) { surf_store(s); return; }
     MSR_PERF_BEGIN(PERF_READBACK);
     u32 bytes = s->w * s->h * 4;
     if (bytes > RB_SIZE) { s->gpu_dirty = 0; return; }
@@ -203,7 +297,7 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     DkImageLayoutMaker lm;
     DkImageLayout lay;
     dkImageLayoutMakerDefaults(&lm, g_dev);
-    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine | (depth ? 0 : DkImageFlags_UsageLoadStore);
     lm.format = depth ? DkImageFormat_Z24S8 : DkImageFormat_RGBA8_Unorm;
     lm.dimensions[0] = w;
     lm.dimensions[1] = h;
@@ -223,9 +317,53 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
 
 static int overlaps(Surf* s, u32 a, u32 n) { return s->used && a < s->addr + s->bytes && s->addr < a + n; }
 
-static void sync_range(u32 a, u32 n) {
+// A render target in VRAM: image -> the GPU's VRAM, and back.
+static void surf_store(Surf* s) {
+    u32 q[16] = {s->addr - VRAM_BASE, s->w, s->h, s->fmt};
+    kernel(K_STORE, q, s->w * s->h / 4, &s->img, 0);
+    vram_touch(s->addr, s->bytes);
+    s->gpu_dirty = 0;
+}
+static void surf_load(Surf* s) {
+    u32 q[16] = {s->addr - VRAM_BASE, s->w, s->h, s->fmt};
+    g_bound_color = g_bound_depth = 0;   // the image is written outside the render pass
+    kernel(K_LOAD, q, s->w * s->h, 0, &s->img);
+    s->cpu_dirty = 0;
+}
+
+// Everything the GPU drew in [a, a + n) reaches the GPU's VRAM (or guest memory, outside VRAM).
+static void store_range(u32 a, u32 n) {
     for (int k = 0; k < MAX_SURF; k++)
         if (overlaps(&g_surf[k], a, n) && g_surf[k].gpu_dirty) surf_readback(&g_surf[k]);
+}
+
+// About to change [a, a + n) of VRAM on the GPU: render targets there keep what lies outside the
+// write (stored first) and will load the result before they are drawn to again.
+static void vram_will_write(u32 a, u32 n) {
+    store_range(a, n);
+    for (int k = 0; k < MAX_SURF; k++) {
+        Surf* s = &g_surf[k];
+        if (!overlaps(s, a, n) || s->depth) continue;
+        s->cpu_dirty = 1;
+        s->clear_pending = 0;
+    }
+}
+
+// The CPU side is about to read [a, a + n): bring guest memory up to date.
+static void sync_range(u32 a, u32 n) {
+    store_range(a, n);
+    if (!n || !in_vram(a, n)) return;
+    u32 p0 = (a - VRAM_BASE) >> 12, p1 = (a - VRAM_BASE + n - 1) >> 12;
+    int stale = 0;
+    for (u32 p = p0; p <= p1; p++) stale |= g_cpu_stale[p];
+    if (!stale) return;
+    flush(1);
+    const u8* src = (const u8*)dkMemBlockGetCpuAddr(g_vram);
+    for (u32 p = p0; p <= p1; p++)
+        if (g_cpu_stale[p]) {
+            memcpy(g_mem + VRAM_BASE + (p << 12), src + (p << 12), 4096);
+            g_cpu_stale[p] = 0;
+        }
 }
 
 // ---- textures --------------------------------------------------------------------------------------
@@ -332,6 +470,7 @@ static void tex_create(Tex* t, u32 w, u32 h) {
     DkImageLayoutMaker lm;
     DkImageLayout lay;
     dkImageLayoutMakerDefaults(&lm, g_dev);
+    lm.flags = DkImageFlags_UsageLoadStore;   // VRAM textures are decoded into it by a compute shader
     lm.format = DkImageFormat_RGBA8_Unorm;
     lm.dimensions[0] = w;
     lm.dimensions[1] = h;
@@ -350,12 +489,35 @@ static DkImage* tex_get(u32 paddr, u32 fmt, u32 w, u32 h) {
     u32 v = pica_vaddr(paddr);
     if (!v || !w || !h || fmt > 13) return 0;
     u32 size = w * h * k_tex_bits[fmt] / 8;
-    sync_range(v, size);
+    int vr = in_vram(v, size);
+    if (vr) store_range(v, size);
+    else sync_range(v, size);
     Tex* hit = 0, *free_t = 0;
     for (int k = 0; k < MAX_TEX; k++) {
         Tex* t = &g_tex[k];
         if (t->used && t->addr == v && t->w == w && t->h == h && t->fmt == fmt) { hit = t; break; }
         if (!t->used && !free_t) free_t = t;
+    }
+    if (vr) {   // decoded on the GPU from its VRAM whenever those pages changed
+        u32 ver = vram_version(v, size);
+        if (hit && hit->hash == ver && hit->checked_frame != ~0u) return &hit->img;
+        if (!hit) {
+            if (!free_t) {
+                flush(1);
+                for (int k = 0; k < MAX_TEX; k++) g_tex[k].used = 0;
+                g_tex_pos = SURF_REGION;
+                free_t = &g_tex[0];
+            }
+            hit = free_t;
+            memset(hit, 0, sizeof *hit);
+            hit->used = 1; hit->addr = v; hit->w = w; hit->h = h; hit->fmt = fmt;
+            tex_create(hit, w, h);
+        }
+        hit->hash = ver;
+        hit->checked_frame = g_frame;
+        u32 q[16] = {v - VRAM_BASE, w, h, fmt};
+        kernel(K_TEXDECODE, q, w * h, 0, &hit->img);
+        return &hit->img;
     }
     if (hit && hit->checked_frame == g_frame) return &hit->img;
     u64 hs = hash_mem(g_mem + v, size);
@@ -513,21 +675,17 @@ static int dk_draw(int indexed) {
     }
     u32 count = hi - lo + 1;
     if (count > 65536) return 1;
-    u64 perm = (u64)r[0x2BB] | ((u64)r[0x2BC] << 32);
-    u32 nattr = (r[0x202] >> 28) + 1, stride = 0;
-    for (u32 a = 0; a < nattr && a < 12; a++) { u32 reg = (perm >> (4 * a)) & 0xF; if (reg + 1 > stride) stride = reg + 1; }
-    if (!stride) stride = 1;
-    u32 need = count * stride * 16 + n * 2 + (4096 + 128) * 4 + 1024 + 4 * 256;
+    // the game's vertex bytes go to the GPU as they are; the vertex shader decodes them
+    static PicaAttrSrc vsrc[16];
+    static PicaLoaderCopy vcp[12];
+    u32 ncp, vbytes;
+    pica_vertex_layout(lo, count, vsrc, vcp, &ncp, &vbytes);
+    if (!vbytes) vbytes = 16;
+    u32 need = vbytes + n * 2 + (4096 + 128) * 4 + 1024 + 4 * 256;
     if (((g_dyn_pos + 255) & ~255u) + need > DYN_SIZE) flush(1);
-    u32 voff = dyn_alloc(count * stride * 16, 256);
-    float* vdst = (float*)(g_dyn_cpu + voff);
+    u32 voff = dyn_alloc(vbytes, 256);
     MSR_PERF_BEGIN(PERF_VERTEX);
-    for (u32 i = 0; i < count; i++) {
-        Vec4 in[16];
-        for (u32 k = 0; k < stride; k++) in[k] = (Vec4){0, 0, 0, 1};
-        pica_load_attributes(lo + i, in);
-        memcpy(vdst + i * stride * 4, in, stride * 16);
-    }
+    for (u32 k = 0; k < ncp; k++) memcpy(g_dyn_cpu + voff + vcp[k].dst, g_mem + vcp[k].src, vcp[k].bytes);
     MSR_PERF_END(PERF_VERTEX);
     u32 ioff = 0;
     if (indexed) {
@@ -595,7 +753,7 @@ static int dk_draw(int indexed) {
             ds->clear_pending = 0;
         }
     }
-    DkBufExtents sb[2] = {{g_program_addr, (4096 + 128) * 4}, {g_dyn_gpu + voff, count * stride * 16}};
+    DkBufExtents sb[2] = {{g_program_addr, (4096 + 128) * 4}, {g_dyn_gpu + voff, (vbytes + 3) & ~3u}};
     dkCmdBufBindStorageBuffers(g_cmd, DkStage_Vertex, 0, sb, 2);
     struct {
         Vec4 f[96];
@@ -603,6 +761,8 @@ static int dk_draw(int indexed) {
         u32 cfg[4];
         u32 outmap[7][4];
         u32 base[4];
+        u32 attr[16][4];
+        Vec4 fixd[16];
     } vs;
     memcpy(vs.f, g_pica.vs.f, sizeof vs.f);
     for (int k = 0; k < 4; k++) {
@@ -611,7 +771,14 @@ static int dk_draw(int indexed) {
     }
     vs.cfg[0] = r[0x2B0] & 0xFFFF; vs.cfg[1] = r[0x2BA] & 0xFFFF; vs.cfg[2] = r[0x2BD]; vs.cfg[3] = r[0x4F] & 7;
     for (int k = 0; k < 7; k++) { vs.outmap[k][0] = r[0x50 + k]; vs.outmap[k][1] = vs.outmap[k][2] = vs.outmap[k][3] = 0; }
-    vs.base[0] = 0; vs.base[1] = stride; vs.base[2] = vs.base[3] = 0;
+    vs.base[0] = vs.base[1] = vs.base[2] = vs.base[3] = 0;
+    for (int k = 0; k < 16; k++) {
+        vs.attr[k][0] = vsrc[k].mode;
+        vs.attr[k][1] = vsrc[k].offset;
+        vs.attr[k][2] = vsrc[k].stride;
+        vs.attr[k][3] = vsrc[k].type | (vsrc[k].comps << 4);
+        vs.fixd[k] = vsrc[k].fixed;
+    }
     DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo);
     dkCmdBufPushConstants(g_cmd, ubo, VS_UBO_SIZE, 0, sizeof vs, &vs);
     struct { u32 regs[352]; float depth[4]; } fs;
@@ -697,6 +864,12 @@ static int dk_draw(int indexed) {
 static void dk_sync(u32 a, u32 n) { if (n) sync_range(a, n); }
 
 static void dk_invalidate(u32 a, u32 n) {
+    if (n && in_vram(a, n)) {   // the CPU wrote VRAM: the GPU's copy takes it
+        vram_will_write(a, n);
+        vram_upload(a, n);
+        vram_touch(a, n);
+        return;
+    }
     for (int k = 0; k < MAX_SURF; k++)
         if (overlaps(&g_surf[k], a, n)) {
             if (g_surf[k].gpu_dirty) surf_readback(&g_surf[k]);   // keep what the GPU drew outside the write
@@ -726,6 +899,111 @@ static void dk_fill(u32 start, u32 end, u32 value, u32 width) {
         }
     }
 }
+
+// GX commands on VRAM, done on the GPU (pica_gx_hook): see hle_hid_gsp.c for the command words.
+static const u32 k_fb_bytes[8] = {4, 3, 2, 2, 2, 4, 4, 4};
+static int dk_gx(int op, const u32* d) {
+    if (op == 2) {   // fill: start, end, value, width
+        u32 start = d[0], end = d[1], value = d[2], width = d[3];
+        if (!in_vram(start, end - start) || (start & 3) || (end & 3)) return 0;
+        for (int k = 0; k < MAX_SURF; k++) {
+            Surf* s = &g_surf[k];
+            if (!s->used || !overlaps(s, start, end - start)) continue;
+            if (!(start <= s->addr && end >= s->addr + s->bytes) && s->gpu_dirty) surf_readback(s);   // keep the rest
+            if (start <= s->addr && end >= s->addr + s->bytes) {   // the whole surface: a GPU clear
+                s->clear_pending = 1;
+                if (s->depth) s->clear_value = value;
+                else if (width & 2) s->clear_value = value;
+                else s->clear_value = (value << 8) | 0xFF;
+                s->gpu_dirty = 0;
+                s->cpu_dirty = 0;
+            } else if (!s->depth) {
+                s->cpu_dirty = 1;
+                s->clear_pending = 0;
+            }
+        }
+        u32 q[16] = {start - VRAM_BASE, end - VRAM_BASE, value, width};
+        kernel(K_FILL, q, (end - start + 3) / 4 + 1, 0, 0);
+        vram_touch(start, end - start);
+        return 1;
+    }
+    if (op == 3) {   // display transfer: input, output, input size, output size, flags
+        u32 fi = (d[4] >> 8) & 7, fo = (d[4] >> 12) & 7, down = (d[4] >> 24) & 3;
+        u32 ow = (d[3] & 0xFFFF) >> (down ? 1 : 0), oh = (d[3] >> 16) >> (down == 2 ? 1 : 0);
+        u32 inb = (d[2] & 0xFFFF) * (d[2] >> 16) * k_fb_bytes[fi], outb = ow * oh * k_fb_bytes[fo];
+        if (!inb || !outb || !in_vram(d[0], inb) || !in_vram(d[1], outb) || ((d[0] | d[1]) & 3) || (ow * oh) & 3) return 0;
+        MSR_PERF_BEGIN(PERF_TRANSFER);
+        store_range(d[0], inb);
+        vram_will_write(d[1], outb);
+        u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, d[2], d[3], d[4]};
+        kernel(K_TRANSFER, q, ow * oh / 4, 0, 0);
+        vram_touch(d[1], outb);
+        MSR_PERF_END(PERF_TRANSFER);
+        return 1;
+    }
+    if (op == 4) {   // texture copy: input, output, size, input gap, output gap, flags
+        u32 iw = (d[3] & 0xFFFF) * 16, ig = (d[3] >> 16) * 16, ow = (d[4] & 0xFFFF) * 16, og = (d[4] >> 16) * 16;
+        u32 size = d[2] & ~15u;
+        u32 in_span = iw ? size + size / iw * ig : size, out_span = ow ? size + size / ow * og : size;
+        if (!size || !in_vram(d[0], in_span) || !in_vram(d[1], out_span) || ((d[0] | d[1]) & 3)) return 0;
+        if (d[0] < d[1] + out_span && d[1] < d[0] + in_span) return 0;   // overlapping copies stay on the CPU
+        MSR_PERF_BEGIN(PERF_TEXCOPY);
+        store_range(d[0], in_span);
+        vram_will_write(d[1], out_span);
+        u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og};
+        kernel(K_COPY, q, size / 4, 0, 0);
+        vram_touch(d[1], out_span);
+        MSR_PERF_END(PERF_TEXCOPY);
+        return 1;
+    }
+    if (op == 0) {   // DMA: source, destination, size
+        u32 src = d[0], dst = d[1], n = d[2];
+        if (!n || !src || !dst || !in_vram(dst, n)) return 0;   // into guest memory: the CPU path (it syncs)
+        if (in_vram(src, n)) {
+            if (src < dst + n && dst < src + n) return 0;
+            store_range(src, n);
+            vram_will_write(dst, n);
+            dkCmdBufCopyBuffer(g_cmd, g_vram_gpu + (src - VRAM_BASE), g_vram_gpu + (dst - VRAM_BASE), n);
+            gpu_barrier();
+            vram_touch(dst, n);
+            return 1;
+        }
+        store_range(src, n);   // a render target in guest memory reaches it first
+        memmove(g_mem + dst, g_mem + src, n);   // guest memory -> VRAM: the CPU's copy too
+        vram_will_write(dst, n);
+        vram_upload(dst, n);
+        vram_touch(dst, n);
+        return 1;
+    }
+    return 0;
+}
+
+// A picture was latched for display: everything queued so far goes to the GPU, so the screen output
+// (on the main thread, the same queue) sees it.
+static void dk_latch(int screen) { (void)screen; flush(0); }
+
+// The screens, converted on the GPU from its VRAM into out (top 400x240 then bottom 320x240, RGBA8,
+// rows bottom to top as the swapchain wants). Recorded into the caller's command buffer; returns
+// 0 for a framebuffer outside VRAM (the caller converts that one on the CPU).
+int dkr_record_screen(DkCmdBuf cmd, int screen, u32 addr, u32 stride, u32 format, DkGpuAddr out, u32 out_word) {
+    u32 W = screen ? 320 : 400, bpp = (format & 7) == 0 ? 4 : (format & 7) == 1 ? 3 : 2;
+    u32 bytes = W * (stride ? stride : 240 * bpp);
+    if (!in_vram(addr, bytes)) return 0;
+    u32 q[16] = {addr - VRAM_BASE, stride, format, W, out_word, 1};
+    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1100;   // the main thread's own slot
+    dkCmdBufPushConstants(cmd, ubo, 64, 0, 64, q);
+    DkBufExtents ub = {ubo, 64};
+    dkCmdBufBindUniformBuffers(cmd, DkStage_Compute, 0, &ub, 1);
+    DkBufExtents sb[2] = {{g_vram_gpu, VRAM_SIZE}, {out, (400 + 320) * 240 * 4}};
+    dkCmdBufBindStorageBuffers(cmd, DkStage_Compute, 0, sb, 2);
+    DkShader const* sh = &g_k[K_SCREEN];
+    dkCmdBufBindShaders(cmd, DkStageFlag_Compute, &sh, 1);
+    dkCmdBufDispatchCompute(cmd, (W * 240 + 63) / 64, 1, 1);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_L2Cache);
+    return 1;
+}
+
+void dkr_vram_stats(unsigned* out) { for (int k = 0; k < K_COUNT; k++) { out[k] = g_vram_ops[k]; g_vram_ops[k] = 0; } }
 
 void dkr_frame_end(void) { g_frame++; }
 
@@ -861,13 +1139,27 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_q = q;
     g_qlock = qlock;
     DkMemBlockMaker mm;
-    u32 code_size = ((pica_vsh_dksh_size + pica_fsh_dksh_size + 2 * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+    static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
+                                             vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh};
+    static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
+                                       vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size};
+    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size;
+    for (int k = 0; k < K_COUNT; k++) all += ksize[k];
+    u32 code_size = ((all + (2 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
     dkMemBlockMakerDefaults(&mm, dev, code_size);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
     g_code = dkMemBlockCreate(&mm);
     u32 co = 0;
     shader_load(&g_vsh, pica_vsh_dksh, pica_vsh_dksh_size, &co);
     shader_load(&g_fsh, pica_fsh_dksh, pica_fsh_dksh_size, &co);
+    for (int k = 0; k < K_COUNT; k++) shader_load(&g_k[k], kcode[k], ksize[k], &co);
+
+    // the GPU's copy of VRAM, starting from what guest memory holds
+    dkMemBlockMakerDefaults(&mm, dev, VRAM_SIZE);
+    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    g_vram = dkMemBlockCreate(&mm);
+    g_vram_gpu = dkMemBlockGetGpuAddr(g_vram);
+    memcpy(dkMemBlockGetCpuAddr(g_vram), g_mem + VRAM_BASE, VRAM_SIZE);
 
     dkMemBlockMakerDefaults(&mm, dev, DYN_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
@@ -880,7 +1172,7 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_dyn_cpu = (u8*)dkMemBlockGetCpuAddr(g_dyn);
     g_dyn_gpu = dkMemBlockGetGpuAddr(g_dyn);
 
-    dkMemBlockMakerDefaults(&mm, dev, 0x1000);
+    dkMemBlockMakerDefaults(&mm, dev, 0x2000);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     g_ubo = dkMemBlockCreate(&mm);
 
@@ -910,6 +1202,8 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     pica_sync_hook = dk_sync;
     pica_invalidate_hook = dk_invalidate;
     pica_fill_hook = dk_fill;
+    pica_gx_hook = dk_gx;
+    pica_latch_hook = dk_latch;
     msr_receipt("gpu: deko3d PICA renderer ready (shaders %u + %u bytes)", (unsigned)pica_vsh_dksh_size, (unsigned)pica_fsh_dksh_size);
 }
 

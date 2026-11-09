@@ -173,9 +173,11 @@ static void gx_command(u32 entry) {
         gx_stat[0]++;
         { u32 rr[2] = {d[0], d[0] + d[2]}, ww[2] = {d[1], d[1] + d[2]};
           fp_op(FP_DMA, ((u64)d[0] << 32) ^ d[1], rr, 1, ww, 1, 1); }   // always runs: the game's own data
-        if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
-        if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
-        if (pica_invalidate_hook) pica_invalidate_hook(d[1], d[2]);
+        if (!(pica_gx_hook && pica_gx_hook(0, d))) {   // the GPU renderer may do it on its side
+            if (pica_sync_hook) pica_sync_hook(d[0], d[2]);
+            if (d[2] && d[0] && d[1]) memmove(g_mem + d[1], g_mem + d[0], d[2]);
+            if (pica_invalidate_hook) pica_invalidate_hook(d[1], d[2]);
+        }
         msr_log("gx: dma %08X -> %08X size %X", d[0], d[1], d[2]);
         gsp_interrupt(IRQ_DMA);
         break;
@@ -191,6 +193,10 @@ static void gx_command(u32 entry) {
             if (!start || end <= start) continue;
             { u32 ww[2] = {start, end};
               if (!fp_op(FP_FILL, ((u64)start << 32) ^ end, 0, 0, ww, 1, 1)) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; } }
+            if (pica_gx_hook) {
+                u32 a[4] = {start, end, value, (d[6] >> (16 * b + 8)) & 3};
+                if (pica_gx_hook(2, a)) { gsp_interrupt(b ? IRQ_PSC1 : IRQ_PSC0); continue; }
+            }
             if (pica_fill_hook) pica_fill_hook(start, end, value, (d[6] >> (16 * b + 8)) & 3);
             u32 ctl = d[6] >> (16 * b), width = (ctl >> 8) & 3;   // bit 8: 24 bit, bit 9: 32 bit, neither: 16
             if (width == 0) for (u32 a = start; a + 2 <= end; a += 2) wr16(a, (u16)value);
@@ -210,6 +216,7 @@ static void gx_command(u32 entry) {
             u32 rr[2] = {d[0], d[0] + (d[2] & 0xFFFF) * (d[2] >> 16) * bpp[fi]}, ww[2] = {d[1], d[1] + ow * oh * bpp[fo]};
             if (!fp_op(FP_TRANSFER, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[4] << 16), rr, 1, ww, 1, 1)) { gsp_interrupt(IRQ_PPF); break; }
         }
+        if (pica_gx_hook && pica_gx_hook(3, d)) { gsp_interrupt(IRQ_PPF); break; }
         if (pica_sync_hook) pica_sync_hook(d[0], (d[2] & 0xFFFF) * (d[2] >> 16) * 4);
         { MSR_PERF_BEGIN(PERF_TRANSFER); pica_display_transfer(d[0], d[1], d[2], d[3], d[4]); MSR_PERF_END(PERF_TRANSFER); }
         if (pica_invalidate_hook) pica_invalidate_hook(d[1], (d[3] & 0xFFFF) * (d[3] >> 16) * 4);
@@ -223,6 +230,7 @@ static void gx_command(u32 entry) {
             u32 in_span = iw ? d[2] + d[2] / iw * ig : d[2], out_span = ow ? d[2] + d[2] / ow * og : d[2];
             u32 rr[2] = {d[0], d[0] + in_span}, ww[2] = {d[1], d[1] + out_span};
             if (!fp_op(FP_COPY, ((u64)d[0] << 32) ^ d[1] ^ ((u64)d[2] << 8), rr, 1, ww, 1, ig == 0 && og == 0)) { gsp_interrupt(IRQ_PPF); break; }
+            if (pica_gx_hook && pica_gx_hook(4, d)) { gsp_interrupt(IRQ_PPF); break; }
             if (pica_sync_hook) pica_sync_hook(d[0], in_span);
             { MSR_PERF_BEGIN(PERF_TEXCOPY); pica_texture_copy(d[0], d[1], d[2], d[3], d[4], d[5]); MSR_PERF_END(PERF_TEXCOPY); }
             if (pica_invalidate_hook) pica_invalidate_hook(d[1], out_span);
@@ -275,6 +283,7 @@ static void gsp_latch_framebuffers(void) {
                     msr_fb[screen].stride, msr_fb[screen].format);
         wr8(rec + 1, 0);
         pica_frame_shown(screen, msr_fb[screen].left, msr_fb[screen].stride, msr_fb[screen].format);
+        if (pica_latch_hook) pica_latch_hook(screen);
         {
             // what the Switch shows: the left image of each screen, in every buffer the game has
             // shown it in (games double-buffer, so the next picture goes to the one not shown now)

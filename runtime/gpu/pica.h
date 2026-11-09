@@ -53,12 +53,22 @@ typedef struct {
 
 void pica_run_list(u32 vaddr, u32 size);
 void pica_load_attributes(u32 index, Vec4* in);
+// Vertex fetch done by the renderer: where each of the 16 shader inputs comes from.
+typedef struct { u32 mode, offset, stride, type, comps; Vec4 fixed; } PicaAttrSrc;   // mode 0 default, 1 fixed, 2 loaded
+typedef struct { u32 src, bytes, dst; } PicaLoaderCopy;   // guest bytes to copy into the vertex buffer
+int pica_vertex_layout(u32 lo, u32 count, PicaAttrSrc* in, PicaLoaderCopy* copies, u32* ncopies, u32* total);
+Vec4 pica_fetch_attr(const PicaAttrSrc* s, const u8* data, u32 vid);
 
 // GPU renderer hooks (the Switch's deko3d renderer); unset in the probe, which draws on the CPU.
 extern int (*pica_draw_hook)(int indexed);                  // returns 1 if it drew
 extern void (*pica_sync_hook)(u32 vaddr, u32 size);         // before the CPU reads guest memory the GPU may have drawn
 extern void (*pica_invalidate_hook)(u32 vaddr, u32 size);   // after the CPU wrote guest memory the GPU may hold
 extern void (*pica_fill_hook)(u32 start, u32 end, u32 value, u32 width);
+// A GX command the GPU renderer can carry out on its side (0 DMA: d = source, destination, size;
+// 2 fill: d = start, end, value, width; 3 display transfer and 4 texture copy: d = the command's
+// words). Returns 1 when it did, and the CPU version is skipped.
+extern int (*pica_gx_hook)(int op, const u32* d);
+extern void (*pica_latch_hook)(int screen);   // a framebuffer swap was latched (a picture is shown)
 extern float pica_lut[24][256][2];
 extern unsigned pica_lut_version, pica_program_version;
 float pica_f24(u32 v);

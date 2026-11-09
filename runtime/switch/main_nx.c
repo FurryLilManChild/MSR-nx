@@ -175,8 +175,17 @@ static void present(void) {
     if (msr_fb[0].swaps == seen[0] && msr_fb[1].swaps == seen[1]) return;
     seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
     MSR_PERF_BEGIN(PERF_PRESENT);
-    convert_screen(0, g_upload, 1);
-    convert_screen(1, g_upload + 400 * 240, 1);
+    // the GPU renderer converts the screens on the GPU from its copy of VRAM; otherwise (or for a
+    // framebuffer outside VRAM) the CPU does it
+    DkGpuAddr up = dkMemBlockGetGpuAddr(g_up_mem);
+    int done0 = 0, done1 = 0;
+    if (g_gpu_render) {
+        int dkr_record_screen(DkCmdBuf cmd, int screen, u32 addr, u32 stride, u32 format, DkGpuAddr out, u32 out_word);
+        done0 = dkr_record_screen(g_cmd, 0, msr_fb[0].left, msr_fb[0].stride, msr_fb[0].format, up, 0);
+        done1 = dkr_record_screen(g_cmd, 1, msr_fb[1].left, msr_fb[1].stride, msr_fb[1].format, up, 400 * 240);
+    }
+    if (!done0) convert_screen(0, g_upload, 1);
+    if (!done1) convert_screen(1, g_upload + 400 * 240, 1);
     mutexLock(&g_qlock);
     int slot = dkQueueAcquireImage(g_queue, g_swap);
     mutexUnlock(&g_qlock);
@@ -184,7 +193,6 @@ static void present(void) {
     dkImageViewDefaults(&fbv, &g_fb[slot]);
     dkCmdBufBindRenderTarget(g_cmd, &fbv, NULL);
     dkCmdBufClearColorFloat(g_cmd, 0, DkColorMask_RGBA, 0, 0, 0, 1);
-    DkGpuAddr up = dkMemBlockGetGpuAddr(g_up_mem);
     for (int k = 0; k < 2; k++) {
         dkImageViewDefaults(&sv[k], &g_scr[k]);
         u32 W = k ? 320 : 400;
@@ -266,7 +274,10 @@ static void convert_screen(int screen, u32* out, int flip);
 static void save_shots(const char* tag) {
     for (int sc = 0; sc < 2; sc++) {
         u32 W = sc ? 320 : 400;
-        convert_screen(sc, g_shot_buf, 0);
+        if (g_gpu_render) {   // what present() last put up (rows bottom to top there)
+            const u32* src = g_upload + (sc ? 400 * 240 : 0);
+            for (u32 y = 0; y < 240; y++) memcpy(g_shot_buf + y * W, src + (239 - y) * W, W * 4);
+        } else convert_screen(sc, g_shot_buf, 0);
         for (u32 i = 0; i < W * 240; i++) {
             g_shot_rgb[i * 3] = g_shot_buf[i] & 0xFF;
             g_shot_rgb[i * 3 + 1] = (g_shot_buf[i] >> 8) & 0xFF;
@@ -360,7 +371,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 5 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 6 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -431,6 +442,11 @@ int main(int argc, char** argv) {
                 void dkr_fs_stats(unsigned* hits, unsigned* misses);
                 dkr_fs_stats(&h, &m);
                 msr_receipt("  fragment shaders: %u draws specialized, %u on the general one", h, m);
+                void dkr_vram_stats(unsigned* out);
+                unsigned vo[7];
+                dkr_vram_stats(vo);
+                msr_receipt("  VRAM on the GPU: %u fills, %u copies, %u transfers, %u stores, %u loads, %u texture decodes",
+                            vo[0], vo[1], vo[2], vo[3], vo[4], vo[5]);
                 static unsigned last_skip, last_total;
                 msr_receipt("  frame plan: %u of %u GPU operations skipped (right eye and other unseen work)",
                             fp_skipped_ops - last_skip, fp_total_ops - last_total);
