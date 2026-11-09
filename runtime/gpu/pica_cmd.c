@@ -425,6 +425,10 @@ u64 pica_fs_key(void) {
     fs_values(v);
     u64 h = 0x84222325CBF29CE4ull;   // a different start from the vertex keys
     for (u32 k = 0; k <= FS_NREGS; k++) h = fnv(h, v[k]);
+    // Bit 63 is kept clear: the shader pack marks a configuration's early-depth variant by setting
+    // it (tools/shaders/fsgen.py). A key with bit 63 set by the hash itself found the other
+    // variant, or nothing, in test builds 7 and 8.
+    h &= ~(1ull << 63);
     if (pica_fs_dump_path) {
         static u64 seen_keys[4096];
         static unsigned nseen;

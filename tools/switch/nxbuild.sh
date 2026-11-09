@@ -20,8 +20,14 @@ if [ "$1" = "link" ]; then
     aarch64-none-elf-gcc $ARCH -c nxout/pack_blob.S -o nxout/pack_blob.o
     PACKOBJ=nxout/pack_blob.o
   fi
+  # the fragment configurations the pack was made from, for the start-up self-test (game-derived too)
+  if [ -f fs.bin ]; then
+    printf '.section .rodata.msr_fsrec,"a"\n.global msr_fsrec_data\n.global msr_fsrec_end\n.balign 16\nmsr_fsrec_data:\n.incbin "/w/fs.bin"\nmsr_fsrec_end:\n' > nxout/fsrec_blob.S
+    aarch64-none-elf-gcc $ARCH -c nxout/fsrec_blob.S -o nxout/fsrec_blob.o
+    PACKOBJ="$PACKOBJ nxout/fsrec_blob.o"
+  fi
   aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test8" nxout/msr.nacp
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test9" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi

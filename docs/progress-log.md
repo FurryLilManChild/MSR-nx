@@ -1,5 +1,25 @@
 # Progress log (newest first)
 
+## 2026-11-09 (afternoon): test 8, white-out traced to the general fragment shader
+
+- Test 8: the white-out came back in new areas; the build's own detector caught it and saved a
+  capture (autocapture1.bin, run008). Replaying that frame in the probe on the reference renderer
+  gives the correct cave picture from the same starting VRAM and command lists, so the fault is in
+  the Switch renderer, not in game state. The scene's draws only read textures from FCRAM, the
+  bottom screen came out about 3 times too bright as well, and the bloom chain matches.
+- Two findings: (1) the fragment key used bit 63 both as part of the hash and as the early-depth
+  flag, so 11 of the 27 configurations reported missing were in the pack and still ran on the
+  general shader; (2) the general fragment shader is the only shader with local memory (2048 bytes
+  per warp, from arrays indexed at run time), and tests 3 to 8 only went bright or white where it
+  drew. Neither is proven to be the white-out yet.
+- For test 9: keys keep bit 63 clear (the existing pack stays valid), the general shader has no
+  arrays (uam: 0 bytes of local memory, 85 registers), 16 new configurations from run008 in the
+  pack (93 fragment configurations, 116 shaders), and a start-up self-test that draws every pack
+  configuration with the pack's shader, the new general shader and test 8's, and writes which
+  differ to the receipt with a picture (selftest.png).
+- Frame plan checked against the capture: the skipped operations in that frame (right eye copies
+  and its glow chain) only fed draws that a later full-screen draw replaced.
+
 ## 2026-11-09 (day): tests 6 to 7
 
 - Test 6 crashed at start (guest memory read before it was mapped; graphics-only queue). Test 6b ran

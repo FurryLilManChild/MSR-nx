@@ -44,7 +44,7 @@ static DkMemBlock g_rb;
 static u8* g_rb_cpu;
 static DkGpuAddr g_rb_gpu;
 static DkCmdBuf g_cmd;
-static DkShader g_vsh, g_fsh;
+static DkShader g_vsh, g_fsh, g_test_vsh, g_fsh_test8;
 static u8* g_dyn_cpu;
 static DkGpuAddr g_dyn_gpu;
 static u32 g_dyn_pos, g_img_pos, g_tex_pos = SURF_REGION;
@@ -1198,7 +1198,6 @@ static const DkShader* fs_select(int* ez) {
     if (g_force_fs_general) { g_fs_misses++; return last = &g_fsh; }
     g_fs_misses++;
     u64 base = key & ~EZ_BIT;
-    if (want_ez) base = key ^ EZ_BIT;
     if (first_miss(base)) {
         msr_receipt("gpu: fragment shader %016llX is not in the pack; it runs on the general one (saved to fs_new.bin)",
                     (unsigned long long)base);
@@ -1230,15 +1229,17 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
                                              vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size};
-    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size;
+    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size + pica_fsh_test8_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
-    u32 code_size = ((all + (2 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+    u32 code_size = ((all + (4 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
     dkMemBlockMakerDefaults(&mm, dev, code_size);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
     g_code = dkMemBlockCreate(&mm);
     u32 co = 0;
     shader_load(&g_vsh, pica_vsh_dksh, pica_vsh_dksh_size, &co);
     shader_load(&g_fsh, pica_fsh_dksh, pica_fsh_dksh_size, &co);
+    shader_load(&g_test_vsh, selftest_vsh_dksh, selftest_vsh_dksh_size, &co);
+    shader_load(&g_fsh_test8, pica_fsh_test8_dksh, pica_fsh_test8_dksh_size, &co);
     for (int k = 0; k < K_COUNT; k++) shader_load(&g_k[k], kcode[k], ksize[k], &co);
 
     // the GPU's copy of VRAM, empty like the guest's at boot. (dkr_init runs before the guest
@@ -1295,6 +1296,174 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     pica_gx_hook = dk_gx;
     pica_latch_hook = dk_latch;
     msr_receipt("gpu: deko3d PICA renderer ready (shaders %u + %u bytes)", (unsigned)pica_vsh_dksh_size, (unsigned)pica_fsh_dksh_size);
+}
+
+// ---- self-test: the general fragment shader against the pack's, on this GPU ----------------------
+// Each fragment configuration the pack was made from (records as in fs_new.bin, built into msr.nro)
+// is drawn three times over a 64x64 target with the same inputs: with the pack's shader for it,
+// with the general shader, and with the general shader of test builds 7 and 8. The general shaders
+// should give the pack's picture; the receipt says where they do not.
+int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
+static u32 st_rand(u32* x) { *x ^= *x << 13; *x ^= *x >> 17; *x ^= *x << 5; return *x; }
+
+void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
+    if (!rec || size < 20 || !g_pack_n) return;
+    enum { S = 64, NI = 3 };
+    DkImageLayoutMaker lm;
+    DkImageLayout lay, tlay;
+    dkImageLayoutMakerDefaults(&lm, g_dev);
+    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = S;
+    lm.dimensions[1] = S;
+    dkImageLayoutInitialize(&lay, &lm);
+    DkImage rt[NI], texi;
+    for (int k = 0; k < NI; k++) dkImageInitialize(&rt[k], &lay, g_img, img_alloc(&lay));
+    dkImageLayoutMakerDefaults(&lm, g_dev);
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = S;
+    lm.dimensions[1] = S;
+    dkImageLayoutInitialize(&tlay, &lm);
+    dkImageInitialize(&texi, &tlay, g_img, img_alloc(&tlay));
+    {   // a texture with every channel varying, and lighting tables with a slope
+        u32 off = dyn_alloc(S * S * 4, 256);
+        u8* t = g_dyn_cpu + off;
+        for (u32 y = 0; y < S; y++)
+            for (u32 x = 0; x < S; x++) {
+                u8* p = t + (y * S + x) * 4;
+                p[0] = (u8)(x * 4); p[1] = (u8)(y * 4); p[2] = (u8)((x ^ y) * 4); p[3] = (u8)(255 - x * 2);
+            }
+        DkImageView v;
+        dkImageViewDefaults(&v, &texi);
+        DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
+        DkImageRect r = {0, 0, 0, S, S, 1};
+        dkCmdBufCopyBufferToImage(g_cmd, &cb, &v, &r, 0);
+        u32 lo = dyn_alloc(256 * 24 * 8, 256);
+        float* l = (float*)(g_dyn_cpu + lo);
+        for (u32 tb = 0; tb < 24; tb++)
+            for (u32 e = 0; e < 256; e++) { l[(tb * 256 + e) * 2] = e / 255.f * (0.5f + tb / 48.f); l[(tb * 256 + e) * 2 + 1] = 1.f / 255.f; }
+        dkImageViewDefaults(&v, &g_lut_img);
+        DkCopyBuf lb = {g_dyn_gpu + lo, 0, 0};
+        DkImageRect lr = {0, 0, 0, 256, 24, 1};
+        dkCmdBufCopyBufferToImage(g_cmd, &lb, &v, &lr, 0);
+        g_lut_uploaded = ~0u;   // the game's tables go in at its first draw
+    }
+    unsigned tested = 0, diff_new = 0, diff_old = 0, worst_n = 0, lines = 0;
+    u64 worst_key = 0;
+    static u8 worst[S * NI * S * 3];
+    size_t pos = 0;
+    while (pos + 16 <= size) {
+        u32 h[4];
+        memcpy(h, rec + pos, 16);
+        if (h[0] != 0x31534650u || pos + 16 + h[3] * 8 + 4 > size) break;
+        u64 key = h[1] | ((u64)h[2] << 32);
+        const u8* pairs = rec + pos + 16;
+        u32 wbuf;
+        memcpy(&wbuf, pairs + h[3] * 8, 4);
+        pos += 16 + h[3] * 8 + 4;
+        const DkShader* packed = pack_find(key);
+        if (!packed) continue;
+        struct { u32 regs[352]; float depth[4]; } fs;
+        u32 seed = (u32)key | 1u;
+        for (int k = 0; k < 352; k++) fs.regs[k] = st_rand(&seed);
+        for (u32 k = 0; k < h[3]; k++) {
+            u32 rv[2];
+            memcpy(rv, pairs + 8 * k, 8);
+            if (rv[0] >= 0x80 && rv[0] < 0x80 + 352) fs.regs[rv[0] - 0x80] = rv[1];
+        }
+        fs.depth[0] = -1.f; fs.depth[1] = 0.f; fs.depth[2] = wbuf ? 1.f : 0.f; fs.depth[3] = 0.f;
+        dyn_reserve(64 * 1024);
+        DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo);
+        dkCmdBufPushConstants(g_cmd, ubo + VS_UBO_SIZE, FS_UBO_SIZE, 0, sizeof fs, &fs);
+        DkBufExtents ub1 = {ubo + VS_UBO_SIZE, FS_UBO_SIZE};
+        dkCmdBufBindUniformBuffers(g_cmd, DkStage_Fragment, 1, &ub1, 1);
+        u32 doff = dyn_alloc(4 * sizeof(DkImageDescriptor) + 4 * sizeof(DkSamplerDescriptor), 64);
+        DkImageDescriptor* idesc = (DkImageDescriptor*)(g_dyn_cpu + doff);
+        DkSamplerDescriptor* sdesc = (DkSamplerDescriptor*)(g_dyn_cpu + doff + 4 * sizeof(DkImageDescriptor));
+        for (int u = 0; u < 4; u++) {
+            DkImageView iv;
+            dkImageViewDefaults(&iv, u < 3 ? &texi : &g_lut_img);
+            dkImageDescriptorInitialize(&idesc[u], &iv, false, false);
+            DkSampler smp;
+            dkSamplerDefaults(&smp);
+            dkSamplerDescriptorInitialize(&sdesc[u], &smp);
+        }
+        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 4);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 4 * sizeof(DkImageDescriptor), 4);
+        DkResHandle th[4] = {dkMakeTextureHandle(0, 0), dkMakeTextureHandle(1, 1), dkMakeTextureHandle(2, 2), dkMakeTextureHandle(3, 3)};
+        dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, th, 4);
+        DkRasterizerState rs;
+        dkRasterizerStateDefaults(&rs);
+        rs.cullMode = DkFace_None;
+        dkCmdBufBindRasterizerState(g_cmd, &rs);
+        DkColorState cst;
+        dkColorStateDefaults(&cst);
+        dkCmdBufBindColorState(g_cmd, &cst);
+        DkColorWriteState cw;
+        dkColorWriteStateDefaults(&cw);
+        dkCmdBufBindColorWriteState(g_cmd, &cw);
+        DkDepthStencilState dss;
+        dkDepthStencilStateDefaults(&dss);
+        dss.depthTestEnable = false;
+        dss.depthWriteEnable = false;
+        dkCmdBufBindDepthStencilState(g_cmd, &dss);
+        DkViewport vp = {0, 0, S, S, 0.0f, 1.0f};
+        dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
+        DkScissor sc = {0, 0, S, S};
+        dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
+        const DkShader* fsh[NI] = {packed, &g_fsh, &g_fsh_test8};
+        for (int k = 0; k < NI; k++) {
+            DkImageView cv;
+            dkImageViewDefaults(&cv, &rt[k]);
+            dkCmdBufBindRenderTarget(g_cmd, &cv, NULL);
+            dkCmdBufClearColorFloat(g_cmd, 0, DkColorMask_RGBA, 1.f, 0.f, 1.f, 0.5f);   // magenta: discarded
+            DkShader const* sh[2] = {&g_test_vsh, fsh[k]};
+            dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
+            dkCmdBufDraw(g_cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+            gpu_barrier();
+            DkCopyBuf cb = {g_rb_gpu + k * S * S * 4, 0, 0};
+            DkImageRect r = {0, 0, 0, S, S, 1};
+            dkCmdBufCopyImageToBuffer(g_cmd, &cv, &r, &cb, 0);
+        }
+        flush(1);
+        armDCacheFlush(g_rb_cpu, NI * S * S * 4);
+        const u8* px = g_rb_cpu;
+        unsigned nd[NI] = {0}, md[NI] = {0};
+        for (int k = 1; k < NI; k++)
+            for (u32 i = 0; i < S * S * 4; i += 4) {
+                unsigned m = 0;
+                for (int c = 0; c < 4; c++) {
+                    int d = (int)px[k * S * S * 4 + i + c] - (int)px[i + c];
+                    if (d < 0) d = -d;
+                    if ((unsigned)d > m) m = (unsigned)d;
+                }
+                if (m > 2) nd[k]++;
+                if (m > md[k]) md[k] = m;
+            }
+        tested++;
+        if (nd[1]) diff_new++;
+        if (nd[2]) diff_old++;
+        if ((nd[1] || nd[2]) && lines++ < 24)
+            msr_receipt("fs self-test: %016llX%s: general shader differs at %u of %u pixels (most %u); test 8's at %u (most %u)",
+                        (unsigned long long)key, wbuf ? " (w-buffer)" : "", nd[1], S * S, md[1], nd[2], md[2]);
+        unsigned score = nd[1] > nd[2] ? nd[1] : nd[2];
+        if (score > worst_n || tested == 1) {   // the first one is pictured even when all match
+            worst_n = score;
+            worst_key = key;
+            for (int k = 0; k < NI; k++)
+                for (u32 y = 0; y < S; y++)
+                    for (u32 x = 0; x < S; x++)
+                        for (int c = 0; c < 3; c++) worst[(y * S * NI + k * S + x) * 3 + c] = px[k * S * S * 4 + (y * S + x) * 4 + c];
+        }
+    }
+    msr_receipt("fs self-test: %u configurations drawn with the pack's shader and the general ones: the general shader differs in %u, test 8's general shader in %u",
+                tested, diff_new, diff_old);
+    if (tested && png_path) {
+        msr_write_png(png_path, worst, S * NI, S);
+        msr_receipt("fs self-test: %016llX pictured in %s (pack's, general, test 8's general)", (unsigned long long)worst_key, png_path);
+    }
+    g_bound_color = g_bound_depth = 0;
+    g_img_pos = g_img_floor;   // the test's images are free again
 }
 
 // Called before the platform shows the LCD framebuffers: everything drawn so far reaches memory.

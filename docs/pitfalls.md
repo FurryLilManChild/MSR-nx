@@ -43,3 +43,10 @@
   readbacks, nothing waited and the 8 MB filled up in a cutscene (deko3d RaiseError OutOfMemory).
   Command memory and the dynamic area now go around rings guarded by fences. Keep the msr.elf of
   every build sent to Mark: Atmosphere crash reports give offsets that addr2line turns into lines.
+- Using bit 63 of a hash key as a flag (the early-depth variant) without clearing it in the hash:
+  configurations whose hash had bit 63 set looked up the wrong variant or nothing, and the receipt
+  called pack shaders "missing" (11 of 27 in test 8). Flags get their own bits; keys are masked.
+- Dynamically indexed arrays in a fragment shader (texc[i], vals[i]) go to local memory. The general
+  fragment shader was the only one with local memory (2048 bytes per warp) and the only one seen
+  drawing white on the Switch; the CPU replay of the same frame was correct. Check per_warp_scratch_sz
+  of every fragment shader too, and keep it at 0.

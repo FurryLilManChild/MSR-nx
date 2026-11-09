@@ -21,9 +21,10 @@ layout (std140, binding = 1) uniform FragmentState {
     vec4 depth;       // x scale, y offset, z 1 for a w-buffer
 };
 
-// The register's word: the uvec4 by index, then the component by plain choices. (Selecting a vector
-// component with a run-time index was the general shader's suspected fault on the Switch: the
-// whole screen went white wherever this shader was drawing, test builds 5 to 7.)
+// The register's word: the uvec4 by index, then the component by plain choices. No array in this
+// shader is indexed by a run-time value: the compiler puts such arrays in local memory, and the
+// general shader (the only one that had local memory, 2048 bytes per warp) is where the screen
+// went white on the Switch, test builds 3 to 8.
 uint dreg(uint id) {
     uint i = id - 0x80u;
     uvec4 v = regs[i >> 2];
@@ -37,16 +38,17 @@ uint reg(uint id) { return dreg(id); }   // MSR-STRUCTURAL
 bool wbuffer() { return depth.z != 0.0; }   // MSR-WBUFFER
 vec4 rgba8(uint v) { return vec4(float(v & 0xFFu), float((v >> 8) & 0xFFu), float((v >> 16) & 0xFFu), float(v >> 24)) / 255.0; }
 
-vec4 prim, fprim, fsec, texc[4], prevc, bufc;
+vec4 prim, fprim, fsec, texc0, texc1, texc2, texc3, prevc, bufc;
+vec4 texsel(uint i) { return i == 0u ? texc0 : i == 1u ? texc1 : i == 2u ? texc2 : texc3; }
 
 vec4 tev_src(uint s, vec4 cst) {
     if (s == 0u) return prim;
     if (s == 1u) return fprim;
     if (s == 2u) return fsec;
-    if (s == 3u) return texc[0];
-    if (s == 4u) return texc[1];
-    if (s == 5u) return texc[2];
-    if (s == 6u) return texc[3];
+    if (s == 3u) return texc0;
+    if (s == 4u) return texc1;
+    if (s == 5u) return texc2;
+    if (s == 6u) return texc3;
     if (s == 13u) return bufc;
     if (s == 14u) return cst;
     return prevc;
@@ -134,13 +136,13 @@ void lighting() {
     vec4 q = length(v_quat) > 0.0 ? normalize(v_quat) : vec4(0.0, 0.0, 0.0, 1.0);
     vec4 shadow = vec4(1.0);
     bool sh_on = (c0 & 1u) != 0u;
-    if (sh_on) { vec4 t = texc[(c0 >> 24) & 3u]; shadow = ((c0 >> 18) & 1u) != 0u ? 1.0 - t : t; }
+    if (sh_on) { vec4 t = texsel((c0 >> 24) & 3u); shadow = ((c0 >> 18) & 1u) != 0u ? 1.0 - t : t; }
     vec3 sn = vec3(0.0, 0.0, 1.0), st = vec3(1.0, 0.0, 0.0);
     uint bump = (c0 >> 28) & 3u;
     if (bump == 1u) {
-        sn = texc[(c0 >> 22) & 3u].rgb * 2.0 - 1.0;
+        sn = texsel((c0 >> 22) & 3u).rgb * 2.0 - 1.0;
         if (((c0 >> 30) & 1u) == 0u) sn.z = sqrt(max(1.0 - dot(sn.xy, sn.xy), 0.0));
-    } else if (bump == 2u) st = texc[(c0 >> 22) & 3u].rgb * 2.0 - 1.0;
+    } else if (bump == 2u) st = texsel((c0 >> 22) & 3u).rgb * 2.0 - 1.0;
     vec3 n = qrot(q, sn), tg = config == 8u ? qrot(q, st) : st;
     vec3 view = v_view.xyz, nv = length(view) > 0.0 ? normalize(view) : vec3(0.0);
     vec4 diff = vec4(0.0, 0.0, 0.0, 1.0), spec = vec4(0.0, 0.0, 0.0, 1.0);
@@ -161,7 +163,7 @@ void lighting() {
             float p = clamp(scl * length(-view - pos) + bias, 0.0, 1.0);
             dist = lut(16u + num, p * 256.0);
         }
-        float vals[9];
+        float val0 = 0.0, val1 = 0.0, val2 = 0.0, val3 = 0.0, val4 = 0.0, val5 = 0.0, val6 = 0.0;
         for (uint fld = 0u; fld < 7u; fld++) {
             uint in_ = (inputs >> (fld * 4u)) & 7u;
             bool absmode = ((absn >> (fld * 4u + 1u)) & 1u) == 0u;
@@ -178,18 +180,20 @@ void lighting() {
             float x;
             if (absmode) { res = two ? abs(res) : max(res, 0.0); x = res * 256.0; }
             else { float e = clamp(floor(res * 128.0), -128.0, 127.0); float idx = e < 0.0 ? e + 256.0 : e; x = idx + (res * 128.0 - e); }
-            vals[fld] = scale * lut(table, x);
+            float v = scale * lut(table, x);
+            if (fld == 0u) val0 = v; else if (fld == 1u) val1 = v; else if (fld == 2u) val2 = v;
+            else if (fld == 3u) val3 = v; else if (fld == 4u) val4 = v; else if (fld == 5u) val5 = v; else val6 = v;
         }
-        float spotv = (((c1 >> (8u + num)) & 1u) == 0u && supported(config, 8u)) ? vals[2] : 1.0;
-        float d0 = (((c1 >> 16) & 1u) == 0u && supported(config, 0u)) ? vals[0] : 1.0;
-        float d1 = (((c1 >> 17) & 1u) == 0u && supported(config, 1u)) ? vals[1] : 1.0;
-        float rr = (((c1 >> 20) & 1u) == 0u && supported(config, 6u)) ? vals[6] : 1.0;
-        float rg = (((c1 >> 21) & 1u) == 0u && supported(config, 5u)) ? vals[5] : rr;
-        float rb = (((c1 >> 22) & 1u) == 0u && supported(config, 4u)) ? vals[4] : rr;
+        float spotv = (((c1 >> (8u + num)) & 1u) == 0u && supported(config, 8u)) ? val2 : 1.0;
+        float d0 = (((c1 >> 16) & 1u) == 0u && supported(config, 0u)) ? val0 : 1.0;
+        float d1 = (((c1 >> 17) & 1u) == 0u && supported(config, 1u)) ? val1 : 1.0;
+        float rr = (((c1 >> 20) & 1u) == 0u && supported(config, 6u)) ? val6 : 1.0;
+        float rg = (((c1 >> 21) & 1u) == 0u && supported(config, 5u)) ? val5 : rr;
+        float rb = (((c1 >> 22) & 1u) == 0u && supported(config, 4u)) ? val4 : rr;
         vec3 sp0 = s0 * d0, sp1 = d1 * vec3(rr, rg, rb) * s1;
         if (slot == count - 1u && ((c1 >> 19) & 1u) == 0u && supported(config, 3u)) {
-            if (((c0 >> 2) & 1u) != 0u) diff.a = vals[3];
-            if (((c0 >> 3) & 1u) != 0u) spec.a = vals[3];
+            if (((c0 >> 2) & 1u) != 0u) diff.a = val3;
+            if (((c0 >> 3) & 1u) != 0u) spec.a = val3;
         }
         float facing = dot(lv, n);
         facing = two ? abs(facing) : max(facing, 0.0);
@@ -228,15 +232,15 @@ bool alpha_ok(uint f, float a, float ref) {
 
 void main() {
     prim = clamp(v_color, 0.0, 1.0);
-    texc[0] = texc[1] = texc[2] = texc[3] = vec4(0.0, 0.0, 0.0, 1.0);
+    texc0 = texc1 = texc2 = texc3 = vec4(0.0, 0.0, 0.0, 1.0);
     uint tc = reg(0x80u);
     if ((tc & 1u) != 0u) {
         vec2 uv = v_uv01.xy;
         if (((reg(0x83u) >> 28) & 7u) == 3u && v_uv2w.z != 0.0) uv /= v_uv2w.z;
-        texc[0] = texture(tex0, uv);
+        texc0 = texture(tex0, uv);
     }
-    if ((tc & 2u) != 0u) texc[1] = texture(tex1, v_uv01.zw);
-    if ((tc & 4u) != 0u) texc[2] = texture(tex2, ((tc >> 13) & 1u) != 0u ? v_uv01.zw : v_uv2w.xy);
+    if ((tc & 2u) != 0u) texc1 = texture(tex1, v_uv01.zw);
+    if ((tc & 4u) != 0u) texc2 = texture(tex2, ((tc >> 13) & 1u) != 0u ? v_uv01.zw : v_uv2w.xy);
     fprim = fsec = vec4(0.0);
     if ((reg(0x8Fu) & 1u) != 0u && (reg(0x1C6u) & 1u) == 0u) lighting();
 
@@ -248,15 +252,15 @@ void main() {
         uint b = s < 4u ? 0xC0u + 8u * s : 0xF0u + 8u * (s - 4u);
         uint srcw = reg(b), opw = reg(b + 1u), cmb = reg(b + 2u), sc = reg(b + 4u);
         vec4 cst = rgba8(reg(b + 3u));
-        vec3 ic[3];
-        float ia[3];
-        for (uint k = 0u; k < 3u; k++) {
-            ic[k] = rgb_op((opw >> (4u * k)) & 15u, tev_src((srcw >> (4u * k)) & 15u, cst));
-            ia[k] = a_op((opw >> (12u + 4u * k)) & 7u, tev_src((srcw >> (16u + 4u * k)) & 15u, cst));
-        }
+        vec3 ic0 = rgb_op(opw & 15u, tev_src(srcw & 15u, cst));
+        vec3 ic1 = rgb_op((opw >> 4) & 15u, tev_src((srcw >> 4) & 15u, cst));
+        vec3 ic2 = rgb_op((opw >> 8) & 15u, tev_src((srcw >> 8) & 15u, cst));
+        float ia0 = a_op((opw >> 12) & 7u, tev_src((srcw >> 16) & 15u, cst));
+        float ia1 = a_op((opw >> 16) & 7u, tev_src((srcw >> 20) & 15u, cst));
+        float ia2 = a_op((opw >> 20) & 7u, tev_src((srcw >> 24) & 15u, cst));
         uint mr = cmb & 15u, ma = (cmb >> 16) & 15u;
-        vec3 outc = comb3(mr, ic[0], ic[1], ic[2]);
-        float outa = mr == 7u ? outc.r : comb1(ma, ia[0], ia[1], ia[2]);
+        vec3 outc = comb3(mr, ic0, ic1, ic2);
+        float outa = mr == 7u ? outc.r : comb1(ma, ia0, ia1, ia2);
         vec4 res = vec4(clamp(outc * float(1u << (sc & 3u)), 0.0, 1.0), clamp(outa * float(1u << ((sc >> 16) & 3u)), 0.0, 1.0));
         bufc = next_buf;
         if (s < 4u) {
