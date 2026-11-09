@@ -38,23 +38,54 @@ static const char* sw_name(u64 b) {
     return "(none)";
 }
 
-// rows: 0 layout, 1 clock, 2..9 bindings, 10 reset bindings, 11 close
-enum { ROW_LAYOUT, ROW_CLOCK, ROW_FPS, ROW_SYNC, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
+enum { ROW_LAYOUT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 
 // ---- clocks -----------------------------------------------------------------------------------------
+// The clocks the system had when the port first changed one, put back when the port exits.
+// GPU choices (sys-clk's list): 0 the system's own (307 handheld, 768 docked), then 460 (the most
+// handheld games get), 614 and 768 (docked speed).
+static const u32 k_gpu_hz[GPU_COUNT] = {0, 460800000u, 614400000u, 768000000u};
+static const char* k_gpu_names[GPU_COUNT] = {"System default", "460 MHz", "614 MHz", "768 MHz (docked)"};
 static int g_clk_ok = -1;
-static ClkrstSession g_cpu;
-static void clock_apply(void) {
+static ClkrstSession g_cpu, g_gpu;
+static u32 g_cpu_orig, g_gpu_orig;
+static int clk_open(void) {
     if (g_clk_ok < 0) {
         g_clk_ok = hosversionAtLeast(8, 0, 0) && R_SUCCEEDED(clkrstInitialize()) &&
-                   R_SUCCEEDED(clkrstOpenSession(&g_cpu, PcvModuleId_CpuBus, 3));
+                   R_SUCCEEDED(clkrstOpenSession(&g_cpu, PcvModuleId_CpuBus, 3)) &&
+                   R_SUCCEEDED(clkrstOpenSession(&g_gpu, PcvModuleId_GPU, 3));
+        if (g_clk_ok) { clkrstGetClockRate(&g_cpu, &g_cpu_orig); clkrstGetClockRate(&g_gpu, &g_gpu_orig); }
     }
-    if (!g_clk_ok) return;
+    return g_clk_ok;
+}
+static void clock_apply(void) {
+    if (!clk_open()) return;
     u32 hz = g_set.clock == CLOCK_BOOST ? 1785000000u : 1020000000u;
     clkrstSetClockRate(&g_cpu, hz);
     u32 now = 0;
     clkrstGetClockRate(&g_cpu, &now);
     msr_receipt("menu: CPU clock set to %u MHz (reads back %u MHz)", hz / 1000000, now / 1000000);
+}
+static void gpu_apply(void) {
+    if (!clk_open()) return;
+    u32 hz = k_gpu_hz[g_set.gpu] ? k_gpu_hz[g_set.gpu] : g_gpu_orig;
+    if (hz) clkrstSetClockRate(&g_gpu, hz);
+    u32 now = 0;
+    clkrstGetClockRate(&g_gpu, &now);
+    msr_receipt("menu: GPU clock set to %s (reads back %u MHz)", k_gpu_names[g_set.gpu], now / 1000000);
+}
+// The port's clocks again after the system changed them (docking switches the GPU clock), and the
+// system's own back when the port exits.
+void port_menu_clocks_refresh(void) {
+    if (g_clk_ok != 1) return;
+    u32 now = 0;
+    if (g_set.gpu) { clkrstGetClockRate(&g_gpu, &now); if (now != k_gpu_hz[g_set.gpu]) clkrstSetClockRate(&g_gpu, k_gpu_hz[g_set.gpu]); }
+    if (g_set.clock == CLOCK_BOOST) { clkrstGetClockRate(&g_cpu, &now); if (now != 1785000000u) clkrstSetClockRate(&g_cpu, 1785000000u); }
+}
+void port_menu_clocks_restore(void) {
+    if (g_clk_ok != 1) return;
+    if (g_cpu_orig) clkrstSetClockRate(&g_cpu, g_cpu_orig);
+    if (g_gpu_orig) clkrstSetClockRate(&g_gpu, g_gpu_orig);
 }
 
 // ---- settings file ----------------------------------------------------------------------------------
@@ -62,7 +93,7 @@ static void save(void) {
     // written in place: the SD card cannot rename over an existing file (learned on MPH-nx)
     FILE* f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "layout=%d\nclock=%d\nfps=%d\nsync=%d\n", g_set.layout, g_set.clock, g_set.show_fps, g_set.sync);
+    fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -82,6 +113,7 @@ void port_menu_init(const char* settings_path) {
             if (sscanf(line, "layout=%d", &v) == 1 && v >= 0 && v < LAYOUT_COUNT) g_set.layout = v;
             else if (sscanf(line, "clock=%d", &v) == 1 && v >= 0 && v < CLOCK_COUNT) g_set.clock = v;
             else if (sscanf(line, "fps=%d", &v) == 1) g_set.show_fps = v != 0;
+            else if (sscanf(line, "gpu=%d", &v) == 1 && v >= 0 && v < GPU_COUNT) g_set.gpu = v;
             else if (sscanf(line, "sync=%d", &v) == 1 && v >= 0 && v < 3) g_set.sync = v;
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
@@ -92,6 +124,7 @@ void port_menu_init(const char* settings_path) {
     msr_receipt("menu: settings %s: layout %s, CPU clock %s", found ? "loaded" : "default", k_layout_names[g_set.layout],
                 k_clock_names[g_set.clock]);
     if (g_set.clock != CLOCK_STOCK) clock_apply();
+    if (g_set.gpu) gpu_apply();
 }
 
 // ---- drawing ----------------------------------------------------------------------------------------
@@ -134,6 +167,7 @@ static void draw(void) {
         const char* label = "";
         if (r == ROW_LAYOUT) { label = "Screen layout"; snprintf(v, sizeof v, "< %s >", k_layout_names[g_set.layout]); }
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
+        else if (r == ROW_GPU) { label = "GPU clock"; snprintf(v, sizeof v, "< %s >", k_gpu_names[g_set.gpu]); }
         else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync (test)"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r < ROW_RESET) {
@@ -189,6 +223,7 @@ u32 port_menu_input(u64 held) {
         if (down & (HidNpadButton_Down | HidNpadButton_StickLDown)) { g_row = (g_row + 1) % NROWS; g_dirty = 1; }
         if (down & (HidNpadButton_Up | HidNpadButton_StickLUp)) { g_row = (g_row + NROWS - 1) % NROWS; g_dirty = 1; }
         if (dx && g_row == ROW_LAYOUT) { g_set.layout = (g_set.layout + LAYOUT_COUNT + dx) % LAYOUT_COUNT; g_dirty = 1; }
+        if (dx && g_row == ROW_GPU) { g_set.gpu = (g_set.gpu + GPU_COUNT + dx) % GPU_COUNT; gpu_apply(); g_dirty = 1; }
         if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }
         if ((dx || (down & HidNpadButton_A)) && g_row == ROW_FPS) { g_set.show_fps = !g_set.show_fps; g_dirty = 1; }
         if (dx && g_row == ROW_CLOCK) { g_set.clock = (g_set.clock + CLOCK_COUNT + dx) % CLOCK_COUNT; clock_apply(); g_dirty = 1; }
@@ -202,7 +237,12 @@ u32 port_menu_input(u64 held) {
     }
 
     // hold minus half a second: the menu; a shorter tap reaches the game as Select (when Select is
-    // on minus). ZL + ZR + minus is the frame capture, not the menu.
+    // on minus). ZL + ZR + minus is the frame capture, not the menu. Single-screen mode: a tap of
+    // minus or plus pauses the game (its Start) and shows the bottom screen (the map); another tap
+    // of either goes back the same way.
+    int single = g_set.layout == LAYOUT_TOP_ONLY;
+    static unsigned long long start_until;
+    if (single && (down & HidNpadButton_Plus)) { g_map_view = !g_map_view; start_until = now + 100000000ull; }
     int minus = (held & HidNpadButton_Minus) != 0;
     int capture_combo = (held & HidNpadButton_ZL) && (held & HidNpadButton_ZR);
     if (minus) {
@@ -215,7 +255,7 @@ u32 port_menu_input(u64 held) {
     } else {
         if (minus_since && !minus_used && now - minus_since < 500000000ull) {
             // single-screen mode: the tap shows or hides the bottom screen (map); otherwise Select
-            if (g_set.layout == LAYOUT_TOP_ONLY) g_map_view = !g_map_view;
+            if (single) { g_map_view = !g_map_view; start_until = now + 100000000ull; }
             else select_until = now + 100000000ull;
         }
         minus_since = 0;
@@ -224,9 +264,11 @@ u32 port_menu_input(u64 held) {
     u32 b = 0;
     for (int k = 0; k < NBIND; k++) {
         u64 sb = g_set.bind[k];
+        if (single && (sb == HidNpadButton_Minus || sb == HidNpadButton_Plus)) continue;   // the map buttons there
         if (sb == HidNpadButton_Minus) { if (now < select_until) b |= 1u << k_bind_bits[k]; }
         else if (held & sb) b |= 1u << k_bind_bits[k];
     }
+    if (now < start_until) b |= 1u << B3_START;
     if (held & HidNpadButton_Right) b |= 1 << 4;
     if (held & HidNpadButton_Left) b |= 1 << 5;
     if (held & HidNpadButton_Up) b |= 1 << 6;

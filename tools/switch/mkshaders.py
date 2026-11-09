@@ -39,7 +39,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     jobs = [('pica_vsh', 'vert', os.path.join(R, 'gpu/dk/pica_vsh.glsl')),
             ('pica_fsh', 'frag', os.path.join(R, 'gpu/dk/pica_fsh.glsl')),
-            ('selftest_vsh', 'vert', os.path.join(R, 'gpu/dk/test/selftest_vsh.glsl'))]
+            ('selftest_vsh', 'vert', os.path.join(R, 'gpu/dk/test/selftest_vsh.glsl')),
+            ('hud_vsh', 'vert', os.path.join(R, 'switch/hud_vsh.glsl')),
+            ('hud_fsh', 'frag', os.path.join(R, 'switch/hud_fsh.glsl'))]
     inc = open(os.path.join(R, 'gpu/dk/vram_ops.inc')).read()
     for k in KERNELS:
         src = os.path.join(out_dir, 'vram_%s.glsl' % k)

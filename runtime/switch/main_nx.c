@@ -19,6 +19,7 @@
 #include "msr_mem.h"
 #include "sched.h"
 #include "port_menu.h"
+#include "dk_shaders.h"   // generated (tools/switch/mkshaders.py): hud_vsh, hud_fsh
 
 #define DIR "sdmc:/switch/msr"
 
@@ -64,6 +65,9 @@ static DkQueue g_queue;
 static DkSwapchain g_swap;
 static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem, g_fps_mem;
 static DkImage g_fb[2], g_scr[2], g_panel_img, g_fps_img;
+// single-screen HUD: its shaders, a uniform block, and the bottom screen's descriptors
+static DkMemBlock g_hud_code, g_hud_data;
+static DkShader g_hud_vsh, g_hud_fsh;
 static DkCmdBuf g_cmd;
 static u32* g_upload;   // CPU-visible staging: top 400x240 then bottom 320x240, RGBA8
 static Mutex g_qlock;   // the game's renderer and the presenter share the queue
@@ -150,6 +154,32 @@ static void display_init(void) {
         mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
         g_fps_mem = dkMemBlockCreate(&mm);
         dkImageInitialize(&g_fps_img, &pl, g_fps_mem, img_off);
+    }
+
+    {   // the single-screen HUD's shaders and data
+        u32 vsz = (sizeof hud_vsh_dksh + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
+        dkMemBlockMakerDefaults(&mm, g_dev, (vsz + sizeof hud_fsh_dksh + DK_SHADER_CODE_UNUSABLE_SIZE + 0xFFFF) & ~0xFFFFu);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+        g_hud_code = dkMemBlockCreate(&mm);
+        u8* code = (u8*)dkMemBlockGetCpuAddr(g_hud_code);
+        memcpy(code, hud_vsh_dksh, sizeof hud_vsh_dksh);
+        memcpy(code + vsz, hud_fsh_dksh, sizeof hud_fsh_dksh);
+        DkShaderMaker sm2;
+        dkShaderMakerDefaults(&sm2, g_hud_code, 0);
+        dkShaderInitialize(&g_hud_vsh, &sm2);
+        dkShaderMakerDefaults(&sm2, g_hud_code, vsz);
+        dkShaderInitialize(&g_hud_fsh, &sm2);
+        // 0x000 uniforms (32 bytes), 0x100 image descriptor, 0x200 sampler descriptor
+        dkMemBlockMakerDefaults(&mm, g_dev, 0x1000);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        g_hud_data = dkMemBlockCreate(&mm);
+        u8* d = (u8*)dkMemBlockGetCpuAddr(g_hud_data);
+        DkImageView iv;
+        dkImageViewDefaults(&iv, &g_scr[1]);
+        dkImageDescriptorInitialize((DkImageDescriptor*)(d + 0x100), &iv, false, false);
+        DkSampler smp;
+        dkSamplerDefaults(&smp);   // nearest: the readouts stay as sharp as the game drew them
+        dkSamplerDescriptorInitialize((DkSamplerDescriptor*)(d + 0x200), &smp);
     }
 
     dkMemBlockMakerDefaults(&mm, g_dev, 0x10000);
@@ -275,11 +305,46 @@ static void present(void) {
             {250, 10, 70, 70, 1240 - 8 - 140, 8},   // top right
             {60, 212, 185, 28, 48, 720 - 8 - 56},   // bottom left
         };
+        // Drawn (not blitted) so the dark backgrounds can be see-through: hud_fsh.glsl.
+        DkGpuAddr hd = dkMemBlockGetGpuAddr(g_hud_data);
+        DkViewport vp = {0, 0, FB_W, FB_H, 0.0f, 1.0f};
+        dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
+        DkRasterizerState rs;
+        dkRasterizerStateDefaults(&rs);
+        rs.cullMode = DkFace_None;
+        dkCmdBufBindRasterizerState(g_cmd, &rs);
+        DkColorState cs;
+        dkColorStateDefaults(&cs);
+        dkColorStateSetBlendEnable(&cs, 0, true);
+        dkCmdBufBindColorState(g_cmd, &cs);
+        DkBlendState bls;
+        dkBlendStateDefaults(&bls);
+        dkBlendStateSetFactors(&bls, DkBlendFactor_SrcAlpha, DkBlendFactor_InvSrcAlpha, DkBlendFactor_Zero, DkBlendFactor_One);
+        dkCmdBufBindBlendStates(g_cmd, 0, &bls, 1);
+        DkColorWriteState cw;
+        dkColorWriteStateDefaults(&cw);
+        dkCmdBufBindColorWriteState(g_cmd, &cw);
+        DkDepthStencilState dss;
+        dkDepthStencilStateDefaults(&dss);
+        dss.depthTestEnable = false;
+        dss.depthWriteEnable = false;
+        dkCmdBufBindDepthStencilState(g_cmd, &dss);
+        dkCmdBufBindImageDescriptorSet(g_cmd, hd + 0x100, 1);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, hd + 0x200, 1);
+        DkResHandle th = dkMakeTextureHandle(0, 0);
+        dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &th, 1);
+        DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
+        dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
+        dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
         for (int k = 0; k < 3; k++) {
-            DkImageRect hs = {(u32)k_hud[k].sx, (u32)(240 - k_hud[k].sy - k_hud[k].h), 0, (u32)k_hud[k].w, (u32)k_hud[k].h, 1};
-            DkImageRect hd = {(u32)k_hud[k].dx, (u32)(FB_H - k_hud[k].dy - 2 * k_hud[k].h), 0, (u32)(2 * k_hud[k].w), (u32)(2 * k_hud[k].h), 1};
-            dkCmdBufBlitImage(g_cmd, &sv[1], &hs, &fbv, &hd, 0, 0);
+            float rect[8] = {(float)k_hud[k].dx, (float)(FB_H - k_hud[k].dy - 2 * k_hud[k].h), (float)(2 * k_hud[k].w), (float)(2 * k_hud[k].h),
+                             (float)k_hud[k].sx, (float)(240 - k_hud[k].sy - k_hud[k].h), (float)k_hud[k].w, (float)k_hud[k].h};
+            dkCmdBufPushConstants(g_cmd, hd, 32, 0, 32, rect);
+            DkBufExtents ub = {hd, 32};
+            dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub, 1);
+            dkCmdBufDraw(g_cmd, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
         }
+        dkCmdBufBarrier(g_cmd, DkBarrier_Fragments, 0);   // before the blits that follow
     }
     if (g_set.show_fps) {   // pictures the game showed on the top screen in the last half second or so
         static unsigned long long t0;
@@ -493,7 +558,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 12 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 13 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -563,6 +628,7 @@ int main(int argc, char** argv) {
                         (now - g_start_ns) / 1e9, (sw - last_swaps) / secs, ccpu / 1000000, cgpu / 1000000,
                         cmem / 1000000);
             msr_perf_report(secs);
+            port_menu_clocks_refresh();
             if (g_gpu_render) {
                 void dkr_vs_stats(unsigned* hits, unsigned* misses);
                 unsigned h, m;
@@ -632,6 +698,7 @@ int main(int argc, char** argv) {
             break;   // L + R + plus + minus: quit
         svcSleepThread(16666667);
     }
+    port_menu_clocks_restore();
     msr_receipt("quit");
     msr_log_close();
     appletUnlockExit();

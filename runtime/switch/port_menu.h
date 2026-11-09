@@ -5,6 +5,7 @@
 
 enum { LAYOUT_BIG_SMALL, LAYOUT_SIDE, LAYOUT_STACKED, LAYOUT_TOP_ONLY, LAYOUT_COUNT };   // TOP_ONLY: single-screen mode
 enum { CLOCK_STOCK, CLOCK_BOOST, CLOCK_COUNT };
+#define GPU_COUNT 4
 // the 3DS buttons a Switch button can be given to (bit order of msr_buttons)
 enum { B3_A, B3_B, B3_SELECT, B3_START, B3_R = 8, B3_L, B3_X, B3_Y };
 #define NBIND 8
@@ -12,6 +13,7 @@ enum { B3_A, B3_B, B3_SELECT, B3_START, B3_R = 8, B3_L, B3_X, B3_Y };
 typedef struct {
     int layout;
     int clock;
+    int gpu;           // GPU clock choice (port_menu.c k_gpu_hz), 0 the system's own
     int show_fps;      // the frame counter
     int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select
@@ -27,7 +29,7 @@ void port_menu_init(const char* settings_path);
 u32 port_menu_input(u64 held);
 // The menu panel, PANEL_W x PANEL_H RGBA, when it changed since the last call (else 0).
 #define PANEL_W 800
-#define PANEL_H 480
+#define PANEL_H 520
 const u32* port_menu_panel(void);
 // Where the screens go on the 1280x720 output for the current layout (w or h 0: not shown).
 typedef struct { int x, y, w, h; } Rect;
@@ -36,3 +38,5 @@ void port_menu_layout(Rect* top, Rect* bottom);
 #define FPS_W 128
 #define FPS_H 24
 const u32* port_menu_fps(int fps10);
+void port_menu_clocks_refresh(void);   // every few seconds: the chosen clocks again if the system changed them
+void port_menu_clocks_restore(void);   // at exit: the system's clocks
