@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-09 (night): run 17 and 18 read, test 17 (single screen follows the pause menu, beams)
+
+- Run 17 (test 16, docked 768 MHz): VRAM work about 600 to 430 ms per 5 s, stores about 1200 to
+  150, right-eye draws run about halved, GPU busy about 40% to 30%, steady 29.6 to 30.
+- Run 18 (test 16, handheld, GPU 307 MHz, 11 minutes): mostly 29.5 to 30; GPU busy 75 to 95% in
+  busy rooms (draws 2.4 to 3.7 s, VRAM work 1.0 s per 5 s). Dips to 21 to 27 mostly with GPU time
+  to spare. Handheld at stock is near the GPU's limit: the scaler will need more speed there.
+- Test 17, single screen: the bottom screen is shown while the game's pause menu frame is on it
+  (the header line at y 24; found in all 7 pause and Samus screen pictures of runs 10 to 18 and in
+  none of the other 40), so closing the menu with B also goes back, and the screen that explains
+  a new ability comes up. Minus and plus are only the game's Start there now.
+- The top-right HUD crop is the lit beam slot (power beam or ice beam so far), and a new mapping
+  "Next beam" (ZR) taps the next slot of the beam column, trying the one after if nothing changed.
+- Pack: 161 fragment configurations, 191 shaders.
+
 ## 2026-11-09 (evening): run 16 read, test 16 (realigned frame plan, copies from images)
 
 - Run 16 (test 15, docked, 768 MHz): the GPU timers check out (the three parts add to about 5000 ms
