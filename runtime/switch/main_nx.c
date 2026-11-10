@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.5.0"
+#define MSR_VERSION "0.5.0 + 60 fps test"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -897,7 +897,7 @@ int main(int argc, char** argv) {
         if ((padGetButtons(&g_pad) & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R)) ==
             (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R))
             break;   // L + R + plus + minus: quit
-        svcSleepThread(16666667);
+        svcSleepThread(g_set.fps60 ? 4000000 : 16666667);   // at 60 the screens are looked at often enough to show every picture
     }
     port_menu_clocks_restore();
     msr_receipt("quit");

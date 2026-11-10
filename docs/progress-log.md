@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-09 (night, 2): 60 fps test build
+
+- The game advances by the measured time between frames (msr2ds src/msr/frame_rate.h, read as
+  reference): its main loop (0x156450) sleeps until 33 ms have passed. tools/gen/generate.py now
+  has PATCHES: cmp/rsb with 33 at 0x156484/0x15648C read msr_frame_limit_ms (33 or 16), and three
+  interface updates that load a constant 1/30 s (0x49DFF8, 0x4E3BA4, 0x10C6B4) take the measured
+  time when msr_fps60 is set. Each patch checks the instruction it replaces. Four units changed.
+- Port menu "Frame rate (test)": 30 (3DS) or 60; at 60 the main loop looks at the screens every
+  4 ms instead of every 16.7 ms.
+- Probe, 90 s of the intro input: about 58.6 pictures per second at 60 against 30 at 30, and the
+  pictures at the same moments match (two identical, the others within a small pan), so the game
+  does not run fast.
+
 ## 2026-11-09 (night): run 26 read, 0.5.0 release prepared
 
 - Run 26 (test 24): every scaler self-test step matches the CPU at 1.5x and 2x, and Mark saw the

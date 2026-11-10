@@ -226,6 +226,10 @@ static u64 next_timer(void) {
 // The port menu pauses the game: the running thread holds here at its next switch, and the clock
 // leaves out the paused time.
 volatile int sched_pause_request;
+// The frame rate (port menu): the game's frame limit in ms and whether its fixed 1/30 s interface
+// steps take the measured frame time instead (tools/gen/generate.py PATCHES). 33 and 0: the 3DS's 30.
+volatile u32 msr_frame_limit_ms = 33;
+volatile int msr_fps60;
 static void pause_point(void) {
     if (!sched_pause_request || !sched_realtime) return;
     u64 t0 = wall_ns();

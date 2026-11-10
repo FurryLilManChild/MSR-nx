@@ -148,6 +148,27 @@ class FnHooks:
         e.line('msr_unknown(c, %s, "%s"); return;' % (emit.h(e.ins.addr), what))
 
 
+# Instructions given their own C instead of the translation: the frame rate (port menu, 30 or 60).
+# The game advances by the measured time between frames, so 60 needs only a shorter frame limit
+# and three interface updates that step by a constant 1/30 s to take the measured time instead.
+# Addresses and the facts behind them: gminustwo/msr2ds src/msr/frame_rate.h (read as reference);
+# checked against our own translation (unit_001.c: cmp r0, #0x21 at 0x156484).
+PATCHES = {
+    # main loop (0x156450): sleep until msr_frame_limit_ms (33 at 30 fps, 16 at 60) since the last frame
+    0x156484: ['{', '  extern volatile u32 msr_frame_limit_ms;', '  (void)subs_(r0, msr_frame_limit_ms, 1, &N, &Z, &C, &V);', '}'],
+    0x15648C: ['{', '  extern volatile u32 msr_frame_limit_ms;', '  r6 = msr_frame_limit_ms - r0;', '}'],
+    # the HUD's update (0x49DFDC): vldr s16, =1/30; at 60 fps the frame time it is given (s0)
+    0x49DFF8: ['{', '  extern volatile int msr_fps60;', '  if (msr_fps60) c->vfp.s[16] = c->vfp.s[0];',
+               '  else c->vfp.s[16] = rd32(0x49E000u + 0x298u);', '}'],
+    # another interface update (0x4E3B40): vldr s16, =1/30 over the frame time; at 60 fps kept
+    0x4E3BA4: ['{', '  extern volatile int msr_fps60;', '  if (!msr_fps60) c->vfp.s[16] = rd32(0x4E3BACu + 0x354u);', '}'],
+    # the interface's fixed-step mode (0x10C688): vldrne s0, [r4, #0x340]; at 60 fps the measured time stays
+    0x10C6B4: ['if (!Z) {', '  extern volatile int msr_fps60;', '  if (!msr_fps60) c->vfp.s[0] = rd32(r4 + 0x340u);', '}'],
+}
+# what each patched instruction must be, so a different game version is not patched blindly
+PATCH_EXPECT = {0x156484: 'cmp', 0x15648C: 'rsb', 0x49DFF8: 'vldr', 0x4E3BA4: 'vldr', 0x10C6B4: 'vldrne'}
+
+
 def gen_function(prog, fn, stats, problems):
     out = ['void %s(Cpu* __restrict c) {' % fname(fn.addr)]
     out += ['  ' + l for l in regs.declare_in()]
@@ -160,6 +181,16 @@ def gen_function(prog, fn, stats, problems):
     for k, a in enumerate(addrs):
         ins = fn.insns[a]
         out.append('L_%08X: // %s %s' % (a, ins.mnem, ins.op_str))
+        if a in PATCHES:
+            if ins.mnem != PATCH_EXPECT[a]:
+                raise SystemExit('patch at %08X expects %s, found %s %s' % (a, PATCH_EXPECT[a], ins.mnem, ins.op_str))
+            out += ['  ' + l for l in PATCHES[a]]
+            stats['patched'] += 1
+            nxt = a + ins.size
+            following = addrs[k + 1] if k + 1 < len(addrs) else None
+            if following != nxt and nxt in fn.insns:
+                out.append('  goto L_%08X;' % nxt)
+            continue
         try:
             body = emit.emit(ins, hooks)
         except emit.Unsupported as ex:

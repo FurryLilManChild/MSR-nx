@@ -17,6 +17,7 @@ typedef struct {
     int show_fps;      // the frame counter
     int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
     int scale;         // resolution scaler for the 3D top screen: 0 1x, 1 1.5x, 2 2x (dk_pica.c g_scale)
+    int fps60;         // frame rate: 0 the 3DS's 30, 1 60 (os/sched.c msr_frame_limit_ms)
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam
 } PortSettings;

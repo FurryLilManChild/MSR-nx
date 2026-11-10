@@ -111,6 +111,11 @@ int main(int argc, char** argv) {
         extern unsigned msr_frame_every;
         const char* e = getenv("MSR_SECONDS");
         if (e) msr_time_limit_ns = (u64)atoi(e) * 1000000000ull;
+        if (getenv("MSR_FPS60")) {   // the port menu's 60 fps (os/sched.c)
+            extern volatile u32 msr_frame_limit_ms;
+            extern volatile int msr_fps60;
+            msr_frame_limit_ms = 16; msr_fps60 = 1;
+        }
         e = getenv("MSR_FS_DUMP");   // file to collect the fragment configurations in
         if (e) { extern const char* pica_fs_dump_path; pica_fs_dump_path = e; }
         e = getenv("MSR_VS_DUMP");   // file to collect the game's vertex shader configurations in
