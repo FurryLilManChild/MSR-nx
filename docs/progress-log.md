@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 2): run 20 read, scaler fix built as test 19
+
+- Run 20 (test 18): Mark saw 1.5x blockier than 1x and 2x only smoother. The receipt: the large
+  pictures were made (148 to 292 per 5 s) but shown for only 17 to 49 of about 200 presents; the
+  rest were the native framebuffer shrunk from the large image (nearest at 1.5x: blocky; 2 x 2
+  average at 2x: smoothed). Cause found in the code: the framebuffer check used 4 KB page versions,
+  and the framebuffer shares its last page with the left eye's render target, written every frame.
+- Test 19: the large picture is dropped only when bytes of its own framebuffer are written. Both
+  sticks pressed in, and each automatic picture pair, also save tNNN_screen.png / pNNN_screen.png,
+  a picture of the whole Switch output.
+
 ## 2026-11-09 (late): run 19 read, test 18 (resolution scaler)
 
 - Run 19 (test 17): the beam switches (slot 0 to 1 and back, four times) and eight pause-view

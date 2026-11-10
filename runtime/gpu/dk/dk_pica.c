@@ -191,8 +191,10 @@ static unsigned g_vram_ops[K_COUNT];
 
 static int in_vram(u32 a, u32 n) { return a >= VRAM_BASE && n <= VRAM_SIZE && a - VRAM_BASE <= VRAM_SIZE - n; }
 
+static void hires_written(u32 a, u32 n);
 static void vram_touch(u32 a, u32 n) {   // the GPU wrote [a, a + n) of VRAM
     if (!n) return;
+    hires_written(a, n);
     g_vram_tick++;
     for (u32 p = (a - VRAM_BASE) >> 12; p <= (a - VRAM_BASE + n - 1) >> 12 && p < VRAM_PAGES; p++) {
         g_vram_ver[p] = g_vram_tick;
@@ -1120,7 +1122,7 @@ static Surf* img_source(u32 a, u32 n) {
 static DkMemBlock g_hires_mem;
 static DkImage g_hires_img[HIRES_N];
 static int g_hires_scale;                       // the size the images were set up for
-static volatile u32 g_hires_addr[HIRES_N], g_hires_ver[HIRES_N];
+static volatile u32 g_hires_addr[HIRES_N];
 static u32 g_hires_next;
 static unsigned g_hires_made;
 static void hires_setup(void) {
@@ -1156,15 +1158,25 @@ static void hires_capture(const u32* d, u32 outb) {
     u32 q[16] = {d[4] & 1};
     q[12] = src->sw; q[13] = src->sh;
     kernel(K_HIRES, q, src->sw * src->sh, &src->img, &g_hires_img[slot]);
-    g_hires_ver[slot] = vram_version(d[1], outb);
+    (void)outb;
     g_hires_addr[slot] = d[1];
     g_hires_made++;
+}
+// Anything else written into a framebuffer (exactly its bytes: test 18 compared 4 KB page versions,
+// and the framebuffer shares a page with the render target after it, cleared every frame, so the
+// large picture was shown for only 1 picture in 5) drops its large picture. Called by vram_touch
+// before hires_capture records the transfer's own write.
+static void hires_written(u32 a, u32 n) {
+    for (int k = 0; k < HIRES_N; k++) {
+        u32 f = g_hires_addr[k];
+        if (f && a < f + 240 * 400 * 3 && f < a + n) g_hires_addr[k] = 0;
+    }
 }
 // main_nx.c: the large picture for the top screen's framebuffer at addr, if there is a current one.
 int dkr_hires_top(u32 addr, DkImage** img, u32* w, u32* h) {
     if (g_hires_scale == 2 || g_scale != g_hires_scale) return 0;
     for (int k = 0; k < HIRES_N; k++)
-        if (g_hires_addr[k] == addr && in_vram(addr, 240 * 400 * 3) && g_hires_ver[k] == vram_version(addr, 240 * 400 * 3)) {
+        if (g_hires_addr[k] == addr) {
             *img = &g_hires_img[k];
             *w = 400 * g_hires_scale / 2;
             *h = 240 * g_hires_scale / 2;

@@ -65,3 +65,8 @@
   operation "different" and run. Match by order with a look-ahead instead.
 - The probe's input replay varies less from frame to frame than real play: the right eye ran 3% of
   the left's draws in the probe and up to 19% on the Switch. Check skip counts on the Switch too.
+- Page versions are too coarse for "is this framebuffer unchanged": the top framebuffer ends in the
+  same 4 KB page where the left eye's render target begins, which is cleared every frame, so test
+  18 showed the scaler's picture for only about 1 picture in 5 (the rest were the shrunk native
+  framebuffer: blocky at 1.5x, merely smoothed at 2x). Track exact byte ranges for that.
+

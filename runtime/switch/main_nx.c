@@ -294,7 +294,13 @@ static void convert_screen(int screen, u32* out, int flip) {
 void dkr_frame_end(void);
 static int g_gpu_render;
 static int g_shot_request, g_shots_left = 6;   // pictures of both screens when the pause view first comes up
-static unsigned g_hires_shown, g_native_shown;   // top-screen pictures shown from the scaler's picture, and not
+static unsigned g_hires_shown, g_native_shown;
+// A picture of the whole Switch output (scaler, HUD and all) as tNNN_screen.png: with each automatic
+// pair of pictures, and on both sticks pressed in together.
+static int g_out_shot;
+static char g_out_shot_tag[48];
+static char g_run_dir[128];
+static DkMemBlock g_out_mem;   // top-screen pictures shown from the scaler's picture, and not
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
     // only convert the screens when the game showed a new picture on one of them; the menu (open,
@@ -467,6 +473,19 @@ static void present(void) {
         DkImageRect ps = {0, 0, 0, PANEL_W, PANEL_H, 1}, pd = {(FB_W - PANEL_W) / 2, (FB_H - PANEL_H) / 2, 0, PANEL_W, PANEL_H, 1};
         dkCmdBufBlitImage(g_cmd, &pv, &ps, &fbv, &pd, 0, 0);
     }
+    if (g_out_shot == 1) {   // the finished output into memory the CPU reads after the wait below
+        if (!g_out_mem) {
+            DkMemBlockMaker mm;
+            dkMemBlockMakerDefaults(&mm, g_dev, (FB_W * FB_H * 4 + 0xFFF) & ~0xFFFu);
+            mm.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
+            g_out_mem = dkMemBlockCreate(&mm);
+        }
+        dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
+        DkCopyBuf ob = {dkMemBlockGetGpuAddr(g_out_mem), 0, 0};
+        DkImageRect orr = {0, 0, 0, FB_W, FB_H, 1};
+        dkCmdBufCopyImageToBuffer(g_cmd, &fbv, &orr, &ob, 0);
+        g_out_shot = 2;
+    }
     // Submit and present, then wait for this list alone, outside the queue lock: waiting for the
     // whole queue under the lock made the game thread stop until the GPU was idle (test 6c).
     DkFence done;
@@ -478,6 +497,26 @@ static void present(void) {
     mutexUnlock(&g_qlock);
     dkFenceWait(&done, -1);
     dkCmdBufClear(g_cmd);
+    if (g_out_shot == 2) {   // rows bottom to top there (the output is shown upside down)
+        g_out_shot = 0;
+        const u32* src = (const u32*)dkMemBlockGetCpuAddr(g_out_mem);
+        armDCacheFlush((void*)src, FB_W * FB_H * 4);
+        u8* rgb = malloc(FB_W * FB_H * 3);
+        if (rgb) {
+            for (u32 y = 0; y < FB_H; y++)
+                for (u32 x = 0; x < FB_W; x++) {
+                    u32 c = src[(FB_H - 1 - y) * FB_W + x];
+                    u8* o = rgb + (y * FB_W + x) * 3;
+                    o[0] = c & 0xFF; o[1] = (c >> 8) & 0xFF; o[2] = (c >> 16) & 0xFF;
+                }
+            char path[300];
+            snprintf(path, sizeof path, "%s/%s_screen.png", g_run_dir, g_out_shot_tag);
+            int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
+            msr_write_png(path, rgb, FB_W, FB_H);
+            free(rgb);
+            msr_receipt("  picture of the Switch output saved: %s_screen.png", g_out_shot_tag);
+        }
+    }
     MSR_PERF_END(PERF_PRESENT);
 }
 
@@ -546,6 +585,8 @@ static void save_shots(const char* tag) {
         msr_write_png(path, g_shot_rgb, W, 240);
     }
     msr_receipt("  pictures saved: %s_top.png, %s_bottom.png", tag, tag);
+    snprintf(g_out_shot_tag, sizeof g_out_shot_tag, "%s", tag);
+    g_out_shot = 1;   // and the output, at the next present
 }
 
 // Clock speeds as the system has them now (sys-clk changes included).
@@ -622,6 +663,16 @@ static void input_poll(void) {
             msr_touch_down = 1; msr_touch_x = (u16)x; msr_touch_y = (u16)y;
         }
     }
+    {   // both sticks pressed in: a picture of the Switch output now
+        static int was;
+        u64 held = padGetButtons(&g_pad);
+        int both = (held & HidNpadButton_StickL) && (held & HidNpadButton_StickR);
+        if (both && !was && !g_out_shot) {
+            snprintf(g_out_shot_tag, sizeof g_out_shot_tag, "p%03d", (int)((msr_now_ns() - g_start_ns) / 1000000000ull));
+            g_out_shot = 1;
+        }
+        was = both;
+    }
     // Next beam (port menu, ZR): a tap on the next slot of the beam column, as a finger would. An
     // empty slot does nothing, so if the lit slot has not changed a moment later the one after it is
     // tried (each slot once).
@@ -658,7 +709,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 18 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 19 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
