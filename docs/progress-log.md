@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-09 (night): run 26 read, 0.5.0 release prepared
+
+- Run 26 (test 24): every scaler self-test step matches the CPU at 1.5x and 2x, and Mark saw the
+  sharper picture. Docked at 768 MHz: 1.5x holds 30 with the GPU about half busy; 2x holds 29.4 to
+  29.6 with the GPU about 70% busy (draws about 2.6 s, VRAM work about 1.0 s per 5 s).
+- 0.5.0 build: version shown in the receipt and the NRO (MSR-nx, 0.5.0, icon); GPU sync defaults to
+  Fewer waits; the "(test)" labels are gone; test-run extras (pictures every 30 s, renderer dumps,
+  pause-view pictures) only with sdmc:/switch/msr/debug; the last ten run folders are kept.
+- tools/extract_3ds.py makes code.bin, exheader.bin and romfs.bin from a decrypted .3ds with only
+  Python; run on Mark's dump, all three match the sha256 sums from 2026-11-07.
+- README (install, controls, port menu), LICENSE (MIT), NOTICE.md (third parties); pack 165
+  fragment configurations, 195 shaders.
+
 ## 2026-11-09 (late, 7): run 25 read, test 24 (texup rewritten)
 
 - Run 25 (test 23 self-test, on the Switch): upload and read back, imgcopy and hires match the

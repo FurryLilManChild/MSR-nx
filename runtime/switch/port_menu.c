@@ -108,6 +108,7 @@ void port_menu_init(const char* settings_path) {
     snprintf(g_path, sizeof g_path, "%s", settings_path);
     g_set.layout = LAYOUT_BIG_SMALL;
     g_set.clock = CLOCK_STOCK;
+    g_set.sync = 1;   // Fewer waits: played on since test 13 without problems
     memcpy(g_set.bind, k_bind_default, sizeof g_set.bind);
     FILE* f = fopen(g_path, "r");
     int found = 0;
@@ -178,9 +179,9 @@ static void draw(void) {
         if (r == ROW_LAYOUT) { label = "Screen layout"; snprintf(v, sizeof v, "< %s >", k_layout_names[g_set.layout]); }
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
         else if (r == ROW_GPU) { label = "GPU clock"; snprintf(v, sizeof v, "< %s >", k_gpu_names[g_set.gpu]); }
-        else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync (test)"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
+        else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
         else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
-        else if (r == ROW_COPIES) { label = "Copies (test)"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
+        else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r < ROW_RESET) {
             int k = r - ROW_BIND0;

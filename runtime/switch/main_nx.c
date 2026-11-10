@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
+#define MSR_VERSION "0.5.0"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -21,6 +22,9 @@
 #include "port_menu.h"
 #include "dk_shaders.h"   // generated (tools/switch/mkshaders.py): hud_vsh, hud_fsh
 
+#include <dirent.h>
+#include <unistd.h>
+typedef DIR DirHandle;   // DIR is the folder below from here on
 #define DIR "sdmc:/switch/msr"
 
 void msr_run(Cpu* c, u32 entry, u32 stop);
@@ -293,6 +297,7 @@ static void convert_screen(int screen, u32* out, int flip) {
 
 void dkr_frame_end(void);
 static int g_gpu_render;
+static int g_debug;   // sdmc:/switch/msr/debug exists: a test run
 static int g_shot_request, g_shots_left = 6;   // pictures of both screens when the pause view first comes up
 static unsigned g_hires_shown, g_native_shown;
 // A picture of the whole Switch output (scaler, HUD and all) as tNNN_screen.png: with each automatic
@@ -355,7 +360,7 @@ static void present(void) {
         static int p_on, p_off;
         if (g_set.layout == LAYOUT_TOP_ONLY && pause_frame_on_bottom()) {
             p_off = 0;
-            if (++p_on >= 2 && !g_map_view) { g_map_view = 1; msr_receipt("single screen: pause menu up, showing the bottom screen"); if (g_shots_left > 0) { g_shots_left--; g_shot_request = 1; } }
+            if (++p_on >= 2 && !g_map_view) { g_map_view = 1; msr_receipt("single screen: pause menu up, showing the bottom screen"); if (g_debug && g_shots_left > 0) { g_shots_left--; g_shot_request = 1; } }
         } else {
             p_on = 0;
             if (++p_off >= 3 && g_map_view) { g_map_view = 0; msr_receipt("single screen: pause menu gone, back to the top screen"); }
@@ -670,7 +675,7 @@ static void input_poll(void) {
         if (both && !was && !g_out_shot) {
             snprintf(g_out_shot_tag, sizeof g_out_shot_tag, "p%03d", (int)((msr_now_ns() - g_start_ns) / 1000000000ull));
             g_out_shot = 1;
-            if (g_set.scale) {   // and the renderer's own images on the way (dk_pica.c dump_all)
+            if (g_set.scale && g_debug) {   // and the renderer's own images on the way (dk_pica.c dump_all)
                 char pre[200];
                 snprintf(pre, sizeof pre, "%s/%s", g_run_dir, g_out_shot_tag);
                 void dkr_request_dump(const char* prefix);
@@ -707,15 +712,33 @@ int main(int argc, char** argv) {
     mkdir(DIR, 0777);
     struct stat st;
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log
+    g_debug = stat(DIR "/debug", &st) == 0;          // create this file for test runs: pictures every 30 s, renderer dumps
     // every launch gets its own folder for the receipt, pictures and anything else it writes
     mkdir(DIR "/switchlogs", 0777);
     for (int n = 1; n < 1000; n++) {
         snprintf(g_run_dir, sizeof g_run_dir, DIR "/switchlogs/run%03d", n);
-        if (mkdir(g_run_dir, 0777) == 0) break;
+        if (mkdir(g_run_dir, 0777) == 0) {
+            if (!g_debug && n > 10) {   // keep the last ten runs' logs, not every run's
+                char old[160], f[300];
+                snprintf(old, sizeof old, DIR "/switchlogs/run%03d", n - 10);
+                DirHandle* d = opendir(old);
+                if (d) {
+                    struct dirent* e;
+                    while ((e = readdir(d))) {
+                        if (e->d_name[0] == '.') continue;
+                        snprintf(f, sizeof f, "%s/%s", old, e->d_name);
+                        remove(f);
+                    }
+                    closedir(d);
+                    rmdir(old);
+                }
+            }
+            break;
+        }
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 24 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx " MSR_VERSION " (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -770,7 +793,7 @@ int main(int argc, char** argv) {
     unsigned long long next_report = g_start_ns + 5000000000ull;
     unsigned last_swaps = 0;
     int reports = 0;
-    unsigned long long shot_at = g_start_ns + 5000000000ull;
+    unsigned long long shot_at = g_debug ? g_start_ns + 5000000000ull : 0;
     void dkr_force_general(int vs, int fs);
     if (g_gpu_render) dkr_force_general(0, 0);   // the shader pack, with the general shaders only for misses
     while (appletMainLoop()) {
@@ -837,7 +860,7 @@ int main(int argc, char** argv) {
             last_swaps = sw;
             next_report = now + 5000000000ull;
             // pictures of both screens every 30 seconds, for comparing against the reference renderer
-            if (++reports % 6 == 0) shot_at = now;
+            if (++reports % 6 == 0 && g_debug) shot_at = now;
         }
         {   // the top screen mostly white (the white-out): capture that frame, up to twice a run. Off
             // since test 16: the white-out is fixed, the game's own white screens tripped it, and
