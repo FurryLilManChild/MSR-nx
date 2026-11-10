@@ -75,4 +75,7 @@
 - Compute kernels that pass vram_ops_test on a PC can still differ on the Switch (k_texup in test
   23). Each new kernel gets a start-up check on the Switch against the same code on its CPU
   (dk_pica.c dkr_scaler_selftest, vram_ref.cpp).
+- 0.5.0's log clean-up deleted run(N-10) and new runs took the lowest free number, so after the
+  first clean-up new logs went into freed low numbers and looked missing. Number from the highest
+  existing run. And when a log is missing, the build is the suspect, not how the tester ran it.
 

@@ -715,25 +715,48 @@ int main(int argc, char** argv) {
     g_debug = stat(DIR "/debug", &st) == 0;          // create this file for test runs: pictures every 30 s, renderer dumps
     // every launch gets its own folder for the receipt, pictures and anything else it writes
     mkdir(DIR "/switchlogs", 0777);
-    for (int n = 1; n < 1000; n++) {
-        snprintf(g_run_dir, sizeof g_run_dir, DIR "/switchlogs/run%03d", n);
-        if (mkdir(g_run_dir, 0777) == 0) {
-            if (!g_debug && n > 10) {   // keep the last ten runs' logs, not every run's
-                char old[160], f[300];
-                snprintf(old, sizeof old, DIR "/switchlogs/run%03d", n - 10);
-                DirHandle* d = opendir(old);
-                if (d) {
-                    struct dirent* e;
-                    while ((e = readdir(d))) {
-                        if (e->d_name[0] == '.') continue;
-                        snprintf(f, sizeof f, "%s/%s", old, e->d_name);
-                        remove(f);
-                    }
-                    closedir(d);
-                    rmdir(old);
-                }
+    // The next number after the highest one there (0.5.0 took the lowest free number, and its own
+    // clean-up of old runs freed low numbers, so new runs hid among old ones), then the runs ten or
+    // more numbers back are removed.
+    int top = 0;
+    {
+        DirHandle* d = opendir(DIR "/switchlogs");
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d))) {
+                int k;
+                if (sscanf(e->d_name, "run%d", &k) == 1 && k > top) top = k;
             }
-            break;
+            closedir(d);
+        }
+    }
+    int n = top + 1 > 999 ? 1 : top + 1;
+    snprintf(g_run_dir, sizeof g_run_dir, DIR "/switchlogs/run%03d", n);
+    mkdir(g_run_dir, 0777);
+    if (!g_debug) {   // keep the last thirty runs
+        DirHandle* d = opendir(DIR "/switchlogs");
+        char old[160], f[300];
+        int gone[64], ng = 0;
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d)) && ng < 64) {
+                int k;
+                if (sscanf(e->d_name, "run%d", &k) == 1 && k <= n - 30) gone[ng++] = k;
+            }
+            closedir(d);
+        }
+        for (int g = 0; g < ng; g++) {
+            snprintf(old, sizeof old, DIR "/switchlogs/run%03d", gone[g]);
+            DirHandle* r = opendir(old);
+            if (!r) continue;
+            struct dirent* e;
+            while ((e = readdir(r))) {
+                if (e->d_name[0] == '.') continue;
+                snprintf(f, sizeof f, "%s/%s", old, e->d_name);
+                remove(f);
+            }
+            closedir(r);
+            rmdir(old);
         }
     }
     msr_log_open(g_run_dir);
