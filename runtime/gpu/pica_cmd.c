@@ -477,7 +477,8 @@ static void rt_stats(void) {
 }
 void pica_rt_summary(void) {
     if (g_vfc > 0) msr_receipt("vfetch check: %llu draws, %llu inputs compared, %llu differ", g_vfc_draws, g_vfc_checked, g_vfc_bad);
-    msr_receipt("frame plan: %u of %u GPU operations skipped (they fed no shown screen)", fp_skipped_ops, fp_total_ops);
+    extern unsigned fp_realigned;
+    msr_receipt("frame plan: %u of %u GPU operations skipped (they fed no shown screen), %u realigned", fp_skipped_ops, fp_total_ops, fp_realigned);
     msr_receipt("right eye reuse: %u draws skipped, %u drawn, %u times made real, %u failures", eye_skipped, eye_drawn_right,
                 eye_materialized, eye_failures);
     if (pica_vtime > 0)

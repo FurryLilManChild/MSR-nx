@@ -330,6 +330,59 @@ int main() {
         run(w * h, k_load);
         printf("%s load format %u\n", memcmp(ref.data(), g_img.data(), w * h * 4) ? (g_fail++, "FAIL") : "ok  ", fmt);
     }
+    // transfers and copies from a render target's image: the same VRAM (outside the render target)
+    // as storing the image first and doing them from VRAM
+    {
+        struct T { u32 addr, w, h, fmt, out, odims, flags; };
+        std::vector<T> ts = {{0x08CA00, 240, 400, 0, 0x000000, 0x019000F0, 0x00001000}, {0x08CA00, 240, 400, 0, 0x300000, 0x014000F0, 0x00001004},
+                             {0x4B8A00, 512, 256, 0, 0x5B8A00, 0x01000200, 0x02000020}};
+        for (u32 fi = 0; fi < 5; fi++)
+            for (u32 fo = 0; fo < 5; fo++)
+                for (u32 mode = 0; mode < 4; mode++)
+                    ts.push_back({0x100000, 128, 128, fi, 0x300000, 0x00800080, (fi << 8) | (fo << 12) | (mode & 1) | ((mode & 2) ? 0x20 : 0) | ((fi + fo + mode) % 3 << 24)});
+        for (auto& t : ts) {
+            randomize();
+            g_img_w = t.w;
+            for (u32 i = 0; i < t.w * t.h; i++) g_img[i] = rnd() ^ (rnd() << 16);
+            auto before = snapshot();
+            q[0] = {t.addr, t.w, t.h, t.fmt};
+            run(t.w * t.h / 4, k_store);
+            q[0] = {t.addr, t.out, (t.h << 16) | t.w, t.odims};
+            q[1] = {t.flags, 0, 0, 0};
+            run((t.odims & 0xFFFF) * (t.odims >> 16) / 4, k_transfer);
+            auto ref = snapshot();
+            memcpy(M(), before.data(), VRAM_BYTES);
+            run((t.odims & 0xFFFF) * (t.odims >> 16) / 4, k_transfer_img);
+            u32 bytes = t.w * t.h * k_fb_bpp[t.fmt];
+            memcpy(&ref[t.addr], &M()[t.addr], bytes);   // the render target's own range is not compared
+            char name[96]; snprintf(name, sizeof name, "transfer from image %X fmt %u flags %08X", t.addr, t.fmt, t.flags);
+            check(name, ref);
+        }
+        struct C { u32 addr, w, h, fmt, out, size, ig, og; };
+        std::vector<C> cs = {{0x08CA00, 240, 400, 0, 0x148200, 0x5DC00, 0x000001E0, 0x002001E0}, {0x08CA00, 240, 400, 1, 0x148200, 0x46500, 0, 0}};
+        for (u32 fmt = 0; fmt < 5; fmt++) cs.push_back({0x100000, 64, 64, fmt, 0x300000, (64 * 64 * k_fb_bpp[fmt] / 2) & ~255u, 0x00100010, 0x00080020});
+        for (auto& c : cs) {
+            randomize();
+            g_img_w = c.w;
+            for (u32 i = 0; i < c.w * c.h; i++) g_img[i] = rnd() ^ (rnd() << 16);
+            auto before = snapshot();
+            q[0] = {c.addr, c.w, c.h, c.fmt};
+            run(c.w * c.h / 4, k_store);
+            q[0] = {c.addr, c.out, c.size, 0};
+            q[1] = {(c.ig & 0xFFFF) * 16, (c.ig >> 16) * 16, (c.og & 0xFFFF) * 16, (c.og >> 16) * 16};
+            run(c.size / 4, k_copy);
+            auto ref = snapshot();
+            memcpy(M(), before.data(), VRAM_BYTES);
+            q[2] = {c.addr, c.w, c.h, c.fmt};
+            // only inputs inside the render target are sent this way: check the span fits
+            u32 iw = q[1].x ? q[1].x : c.size, span = c.size + c.size / iw * q[1].y;
+            if (span > c.w * c.h * k_fb_bpp[c.fmt]) { printf("skip copy %X fmt %u (span past the target)\n", c.addr, c.fmt); continue; }
+            run(c.size / 4, k_copy_img);
+            memcpy(&ref[c.addr], &M()[c.addr], c.w * c.h * k_fb_bpp[c.fmt]);
+            char name[96]; snprintf(name, sizeof name, "copy from image %X fmt %u", c.addr, c.fmt);
+            check(name, ref);
+        }
+    }
     // texture decode, every format
     for (u32 fmt = 0; fmt < 14; fmt++) {
         u32 w = 128, h = 64, addr = 0x200000;

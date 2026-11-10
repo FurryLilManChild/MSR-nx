@@ -169,7 +169,7 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 #define VRAM_BASE 0x1F000000u
 #define VRAM_SIZE (6u << 20)
 #define VRAM_PAGES (VRAM_SIZE >> 12)
-enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_COUNT };
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_COUNT };
 static DkMemBlock g_vram;
 static DkGpuAddr g_vram_gpu;
 static DkShader g_k[K_COUNT];
@@ -1057,6 +1057,25 @@ static void dk_fill(u32 start, u32 end, u32 value, u32 width) {
     }
 }
 
+// A transfer or copy that reads only a render target the GPU drew since it was last stored (and
+// nothing else not yet stored) can read its image directly: no store to VRAM first. The render
+// target stays unstored until something else needs its VRAM. Port menu: Copies, From images (1)
+// or Through VRAM (0).
+static int g_img_path = 1;
+void dkr_set_img_path(int on) { g_img_path = on; }
+static Surf* img_source(u32 a, u32 n) {
+    if (!g_img_path) return 0;
+    Surf* src = 0;
+    for (int k = 0; k < MAX_SURF; k++) {
+        Surf* s = &g_surf[k];
+        if (!overlaps(s, a, n) || s->depth || !s->gpu_dirty) continue;   // depth is never stored; VRAM is current for the rest
+        if (src) return 0;
+        src = s;
+    }
+    if (!src || src->clear_pending || a < src->addr || a + n > src->addr + src->bytes || (src->w & 7) || (src->h & 7)) return 0;
+    return src;
+}
+
 // GX commands on VRAM, done on the GPU (pica_gx_hook): see hle_hid_gsp.c for the command words.
 static const u32 k_fb_bytes[8] = {4, 3, 2, 2, 2, 4, 4, 4};
 static int dk_gx(int op, const u32* d) {
@@ -1090,6 +1109,16 @@ static int dk_gx(int op, const u32* d) {
         u32 inb = (d[2] & 0xFFFF) * (d[2] >> 16) * k_fb_bytes[fi], outb = ow * oh * k_fb_bytes[fo];
         if (!inb || !outb || !in_vram(d[0], inb) || !in_vram(d[1], outb) || ((d[0] | d[1]) & 3) || (ow * oh) & 3) return 0;
         MSR_PERF_BEGIN(PERF_TRANSFER);
+        u32 iw = d[2] & 0xFFFF, ih = d[2] >> 16;
+        Surf* is = (d[4] & 2) ? 0 : img_source(d[0], inb);   // tiled input only
+        if (is && is->addr == d[0] && is->w == iw && is->h == ih && is->fmt == fi) {
+            vram_will_write(d[1], outb);
+            u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, d[2], d[3], d[4]};
+            kernel(K_TRANSFER_IMG, q, ow * oh / 4, &is->img, 0);
+            vram_touch(d[1], outb);
+            MSR_PERF_END(PERF_TRANSFER);
+            return 1;
+        }
         store_range(d[0], inb);
         vram_will_write(d[1], outb);
         u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, d[2], d[3], d[4]};
@@ -1105,6 +1134,15 @@ static int dk_gx(int op, const u32* d) {
         if (!size || !in_vram(d[0], in_span) || !in_vram(d[1], out_span) || ((d[0] | d[1]) & 3)) return 0;
         if (d[0] < d[1] + out_span && d[1] < d[0] + in_span) return 0;   // overlapping copies stay on the CPU
         MSR_PERF_BEGIN(PERF_TEXCOPY);
+        Surf* is = img_source(d[0], in_span);
+        if (is) {
+            vram_will_write(d[1], out_span);
+            u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og, is->addr - VRAM_BASE, is->w, is->h, is->fmt};
+            kernel(K_COPY_IMG, q, size / 4, &is->img, 0);
+            vram_touch(d[1], out_span);
+            MSR_PERF_END(PERF_TEXCOPY);
+            return 1;
+        }
         store_range(d[0], in_span);
         vram_will_write(d[1], out_span);
         u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og};
@@ -1592,9 +1630,10 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_qlock = qlock;
     DkMemBlockMaker mm;
     static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
-                                             vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh};
+                                             vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
-                                       vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size};
+                                       vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
+                                       vram_copy_img_dksh_size};
     u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
     u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);

@@ -1,5 +1,25 @@
 # Progress log (newest first)
 
+## 2026-11-09 (evening): run 16 read, test 16 (realigned frame plan, copies from images)
+
+- Run 16 (test 15, docked, 768 MHz): the GPU timers check out (the three parts add to about 5000 ms
+  each 5 s). Gameplay held 29 to 30 per second with the GPU busy about 35 to 40% (draws about
+  1.3 s, VRAM work about 0.6 s per 5 s). The right eye still ran 10 to 19% as many draws as the
+  left (the probe: 3%). A white top screen at 85 s set off the white-out capture; replayed on the
+  reference renderer it is the same picture (583 of 96000 pixels differ by rounding), so it is the
+  game's own. 7 new fragment shaders came back in fs_new.bin.
+- Frame plan: operations were matched to last frame's by position, so one more or one fewer early
+  on made everything after it run. Now it looks up to 48 places ahead to line the lists up again.
+  Probe, 240 s of play: right-eye draws 23331 to 14473, 0 of 75 sampled top pictures differ from
+  the run without it. (MSR_FPPOS=1 gives the old matching.)
+- Copies from images: a display transfer or texture copy that reads only a render target the GPU
+  drew since its last store now reads the target's image directly (k_transfer_img, k_copy_img in
+  vram_ops.inc) instead of storing it to VRAM first. tools/tests/vram_ops_test.cpp checks both
+  against store-then-transfer and store-then-copy for the game's cases and every format: all pass.
+  Port menu row "Copies (test)": From images (default) or Through VRAM. Only the Switch runs this
+  path; the receipt counts copies and transfers made from images.
+- Pack: 159 fragment configurations, 189 shaders. White-out autocapture off.
+
 ## 2026-11-09 (night): test 14, test 15 (GPU timers)
 
 - Test 14: in single screen the file select screen is shown by itself while it is up (found from

@@ -61,3 +61,7 @@
   every even x, so every fresh token came out the same. Use a counter: mix(seed, ++n).
 - Before building a GPU saving, count what already runs: right-eye reuse was built for work the
   frame plan already skipped (the right eye ran 3.4% of the left eye's draws).
+- The frame plan matched operations by position: one extra object early in a frame made every later
+  operation "different" and run. Match by order with a look-ahead instead.
+- The probe's input replay varies less from frame to frame than real play: the right eye ran 3% of
+  the left's draws in the probe and up to 19% on the Switch. Check skip counts on the Switch too.

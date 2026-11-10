@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 15 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 16 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -680,23 +680,26 @@ int main(int argc, char** argv) {
                 unsigned dkr_ez_stats(void);
                 msr_receipt("  early depth: %u draws", dkr_ez_stats());
                 void dkr_vram_stats(unsigned* out);
-                unsigned vo[7];
+                unsigned vo[9];
                 dkr_vram_stats(vo);
-                msr_receipt("  VRAM on the GPU: %u fills, %u copies, %u transfers, %u stores, %u loads, %u texture decodes",
-                            vo[0], vo[1], vo[2], vo[3], vo[4], vo[5]);
-                static unsigned last_skip, last_total;
-                msr_receipt("  frame plan: %u of %u GPU operations skipped (right eye and other unseen work)",
-                            fp_skipped_ops - last_skip, fp_total_ops - last_total);
-                last_skip = fp_skipped_ops; last_total = fp_total_ops;
+                msr_receipt("  VRAM on the GPU: %u fills, %u copies (%u from images), %u transfers (%u from images), %u stores, %u loads, %u texture decodes",
+                            vo[0], vo[1] + vo[8], vo[8], vo[2] + vo[7], vo[7], vo[3], vo[4], vo[5]);
+                static unsigned last_skip, last_total, last_realign;
+                extern unsigned fp_realigned;
+                msr_receipt("  frame plan: %u of %u GPU operations skipped (right eye and other unseen work), %u realigned",
+                            fp_skipped_ops - last_skip, fp_total_ops - last_total, fp_realigned - last_realign);
+                last_skip = fp_skipped_ops; last_total = fp_total_ops; last_realign = fp_realigned;
             }
             last_swaps = sw;
             next_report = now + 5000000000ull;
             // pictures of both screens every 30 seconds, for comparing against the reference renderer
             if (++reports % 6 == 0) shot_at = now;
         }
-        {   // the top screen mostly white (the white-out): capture that frame, up to twice a run
+        {   // the top screen mostly white (the white-out): capture that frame, up to twice a run. Off
+            // since test 16: the white-out is fixed, the game's own white screens tripped it, and
+            // saving the 80 MB capture stalls the game
             static unsigned long long next_check;
-            static int auto_caps;
+            static int auto_caps = 2;
             if (g_gpu_render && auto_caps < 2 && now >= next_check) {
                 next_check = now + 1000000000ull;
                 unsigned white = 0, total = 0;

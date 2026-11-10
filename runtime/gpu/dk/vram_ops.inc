@@ -43,6 +43,15 @@ uint fb_bpp(uint fmt) { return fmt == 0u ? 4u : fmt == 1u ? 3u : 2u; }
 // rounded to nearest).
 uint x5(uint v) { return (v * 510u + 31u) / 62u; }
 uint x6(uint v) { return (v * 510u + 63u) / 126u; }
+// The same from the pixel's bytes (low byte first, as px_encode gives them).
+uint px_from_bits(uint e, uint fmt) {
+    if (fmt == 0u) return pack4(ch(e, 3u), ch(e, 2u), ch(e, 1u), ch(e, 0u));
+    if (fmt == 1u) return pack4(ch(e, 2u), ch(e, 1u), ch(e, 0u), 255u);
+    uint h = e & 0xFFFFu;
+    if (fmt == 2u) return pack4(x5((h >> 11u) & 31u), x5((h >> 6u) & 31u), x5((h >> 1u) & 31u), (h & 1u) != 0u ? 255u : 0u);
+    if (fmt == 3u) return pack4(x5((h >> 11u) & 31u), x6((h >> 5u) & 63u), x5(h & 31u), 255u);
+    return pack4(((h >> 12u) & 15u) * 17u, ((h >> 8u) & 15u) * 17u, ((h >> 4u) & 15u) * 17u, (h & 15u) * 17u);
+}
 uint px_read(uint a, uint fmt) {
     if (fmt == 0u) return pack4(ld8(a + 3u), ld8(a + 2u), ld8(a + 1u), ld8(a));
     if (fmt == 1u) return pack4(ld8(a + 2u), ld8(a + 1u), ld8(a), 255u);
@@ -131,7 +140,7 @@ void k_copy(uint gid) {
 
 // ---- DisplayTransfer: q[0] = in, out, input dims, output dims; q[1].x = flags.
 // Four output pixels (consecutive in memory) per invocation.
-void k_transfer(uint gid) {
+void transfer_body(uint gid, uint from_img) {
     uint inp = q[0].x, outp = q[0].y, flags = q[1].x;
     uint iw = q[0].z & 0xFFFFu, ih = q[0].z >> 16u;
     uint flip = flags & 1u, in_linear = (flags >> 1u) & 1u, same = (flags >> 5u) & 1u;
@@ -160,7 +169,9 @@ void k_transfer(uint gid) {
         for (uint j = 0u; j < sy; j++)
             for (uint i = 0u; i < sx; i++) {
                 uint xx = x * sx + i, yy = y * sy + j;
-                uint c = px_read(inp + (in_linear != 0u ? yy * iw + xx : tiled_index(xx, yy, iw)) * bi, fi);
+                uint c;
+                if (from_img != 0u) c = px_from_bits(px_encode(IMG_READ(xx, ih - 1u - yy), fi), fi);   // as k_store, then px_read
+                else c = px_read(inp + (in_linear != 0u ? yy * iw + xx : tiled_index(xx, yy, iw)) * bi, fi);
                 ar += ch(c, 0u); ag += ch(c, 1u); ab += ch(c, 2u); aa += ch(c, 3u);
             }
         uint ln = lx + ly;   // n is 1, 2 or 4
@@ -169,6 +180,32 @@ void k_transfer(uint gid) {
         for (uint t = 0u; t < bo; t++) put8(k * bo + t, e >> (8u * t));
     }
     group_store(word, nwords);
+}
+void k_transfer(uint gid) { transfer_body(gid, 0u); }
+// The same with the input read from the render target's image (bound as the source) instead of
+// VRAM, where the image is newer: what k_store would have put there, without storing it. The input
+// is tiled and is exactly the render target (dk_pica.c checks).
+void k_transfer_img(uint gid) { transfer_body(gid, 1u); }
+
+// ---- TextureCopy from a render target's image (bound as the source), as k_store then k_copy.
+// q[2] = the render target: addr, w, h, fmt; the input lies within it.
+void k_copy_img(uint gid) {
+    uint size = q[0].z & ~15u, b = gid * 4u;
+    if (b >= size) return;
+    uint iw = q[1].x != 0u ? q[1].x : size, ow = q[1].z != 0u ? q[1].z : size;
+    uint bi = udiv(b, iw), bo = udiv(b, ow);
+    uint ia = q[0].x + bi * (iw + q[1].y) + (b - bi * iw);
+    uint oa = q[0].y + bo * (ow + q[1].w) + (b - bo * ow);
+    uint sa = q[2].x, w = q[2].y, h = q[2].z, fmt = q[2].w, bpp = fb_bpp(fmt), tiles_x = w / 8u;
+    uint v = 0u;
+    for (uint t = 0u; t < 4u; t++) {
+        uint o = ia + t - sa, m = udiv(o, bpp), k = o - m * bpp;
+        uint tile = m >> 6u, tr = udiv(tile, tiles_x);
+        uint x = (tile - tr * tiles_x) * 8u + demorton_x(m & 63u), y = tr * 8u + demorton_y(m & 63u);
+        uint e = px_encode(IMG_READ(x, h - 1u - y), fmt);
+        v |= ((e >> (8u * k)) & 0xFFu) << (8u * t);
+    }
+    STW(oa >> 2u, v);
 }
 
 // ---- Render target to VRAM: q[0] = addr, w, h, fmt. The image row for memory row y is h - 1 - y.

@@ -5,7 +5,8 @@
 // fills, display transfers, texture copies, DMA) are recorded with the memory they read and write.
 // At the end of the frame a backward pass marks the operations that feed the displayed framebuffers
 // (or memory the next frame reads before writing). The next frame skips the others, as long as it
-// issues the same operation at the same position; anything that differs runs. The probe checks that the shown pictures are byte-identical with and
+// issues the same operation in the same order (an operation more or fewer in between is allowed for:
+// the lists are realigned); anything new runs. The probe checks that the shown pictures are byte-identical with and
 // without skipping (MSR_NOSKIP=1 runs everything).
 #include <stdlib.h>
 #include <string.h>
@@ -37,12 +38,18 @@ static unsigned g_plan_n;
 static int g_diverged;
 static unsigned g_diverge_at;
 static int g_enabled = -1;
+static unsigned g_cursor;      // where this frame is in last frame's list
+static int g_by_position = -1; // MSR_FPPOS=1: the old matching, by position only
+#define REALIGN_WINDOW 48
+unsigned fp_realigned;
 unsigned fp_skipped_ops, fp_total_ops;
 
 static int enabled(void) {
     if (g_enabled < 0) {
         const char* e = getenv("MSR_NOSKIP");
         g_enabled = !(e && e[0] == '1');
+        e = getenv("MSR_FPPOS");
+        g_by_position = e && e[0] == '1';
     }
     return g_enabled;
 }
@@ -56,8 +63,19 @@ int fp_op(u32 type, u64 sig, const u32* rd, unsigned nrd, const u32* wr, unsigne
     // one and fed nothing shown. Positions that differ (the double-buffered framebuffer address
     // alternates, for one) simply run.
     if (enabled()) {
-        if (i < g_plan_n && g_plan_sig[i] == sig) run = g_plan_live[i];
-        else if (!g_diverged) { g_diverged = 1; g_diverge_at = i; }
+        unsigned j = g_cursor;
+        if (j < g_plan_n && g_plan_sig[j] == sig) { run = g_plan_live[j]; g_cursor = j + 1; }
+        else {
+            if (!g_diverged) { g_diverged = 1; g_diverge_at = i; }
+            // Realign: last frame's list with an operation more or fewer earlier on (one object
+            // more on screen) is the same list from here on. Look a little way ahead for this one;
+            // not found, it is new this frame and runs, and the place in last frame's list stays.
+            if (g_by_position != 1) {
+                unsigned end = j + REALIGN_WINDOW < g_plan_n ? j + REALIGN_WINDOW : g_plan_n;
+                for (unsigned k = j + 1; k < end; k++)
+                    if (g_plan_sig[k] == sig) { run = g_plan_live[k]; g_cursor = k + 1; fp_realigned++; break; }
+            } else if (j < g_plan_n) g_cursor = j + 1;
+        }
     }
     if (i < MAX_OPS) {
         Op* o = &g_ops[i];
@@ -172,6 +190,7 @@ void fp_frame_end(const u32* out, unsigned nout) {
         frame++;
     }
     g_nops = 0;
+    g_cursor = 0;
     g_diverged = 0;
 }
 

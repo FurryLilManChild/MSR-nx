@@ -16,6 +16,7 @@ typedef struct {
     int gpu;           // GPU clock choice (port_menu.c k_gpu_hz), 0 the system's own
     int show_fps;      // the frame counter
     int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
+    int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select
 } PortSettings;
 
