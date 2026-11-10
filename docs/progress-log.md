@@ -1,5 +1,13 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 5): run 23 read, test 22 (scaler diagnostics)
+
+- Run 23 (test 21): still dark at 1.5x and 2x, so the copy engine was not the cause.
+- Test 22: with the scaler on, both sticks pressed in also saves the renderer's own images at the
+  next large top-screen picture: the render target, the large screen picture, and each copy's
+  snapshot and large texture (pNNN_target, _screen, _snapK, _texK), with their sizes, states and
+  mean levels in the receipt. That shows at which step the picture goes dark.
+
 ## 2026-11-09 (late, 4): run 22 read, test 21
 
 - Run 22 (test 20): 1x fine; 1.5x and 2x nearly black (p039 at 1.5x: a dark, enlarged corner of

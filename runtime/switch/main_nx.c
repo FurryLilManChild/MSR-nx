@@ -670,6 +670,12 @@ static void input_poll(void) {
         if (both && !was && !g_out_shot) {
             snprintf(g_out_shot_tag, sizeof g_out_shot_tag, "p%03d", (int)((msr_now_ns() - g_start_ns) / 1000000000ull));
             g_out_shot = 1;
+            if (g_set.scale) {   // and the renderer's own images on the way (dk_pica.c dump_all)
+                char pre[200];
+                snprintf(pre, sizeof pre, "%s/%s", g_run_dir, g_out_shot_tag);
+                void dkr_request_dump(const char* prefix);
+                dkr_request_dump(pre);
+            }
         }
         was = both;
     }
@@ -709,7 +715,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 21 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 22 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }

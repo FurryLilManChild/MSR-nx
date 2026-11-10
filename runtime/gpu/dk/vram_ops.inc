@@ -394,3 +394,12 @@ void k_imgcopy(uint gid) {
     uint y = udiv(gid, w), x = gid - y * w;
     IMG_WRITE(x, y, IMG_READ(x, y));
 }
+
+// ---- An image (bound as the source, q[3] its size) into the output buffer, row by row. For
+// pictures of the renderer's own images (both sticks pressed in at a larger 3D screen size).
+void k_dump(uint gid) {
+    uint w = q[3].x, h = q[3].y;
+    if (gid >= w * h) return;
+    uint y = udiv(gid, w), x = gid - y * w;
+    OUTW(gid, IMG_READ(x, y));
+}

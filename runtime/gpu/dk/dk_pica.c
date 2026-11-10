@@ -180,7 +180,7 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 #define VRAM_BASE 0x1F000000u
 #define VRAM_SIZE (6u << 20)
 #define VRAM_PAGES (VRAM_SIZE >> 12)
-enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_TEXUP, K_IMGCOPY, K_COUNT };
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_TEXUP, K_IMGCOPY, K_DUMP, K_COUNT };
 static DkMemBlock g_vram;
 static DkGpuAddr g_vram_gpu;
 static DkShader g_k[K_COUNT];
@@ -296,7 +296,7 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
     dkCmdBufPushConstants(g_cmd, ubo, 64, 0, 64, q);
     DkBufExtents ub = {ubo, 64};
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Compute, 0, &ub, 1);
-    DkBufExtents sb[2] = {{g_vram_gpu, VRAM_SIZE}, {g_vram_gpu, VRAM_SIZE}};
+    DkBufExtents sb[2] = {{g_vram_gpu, VRAM_SIZE}, {k == K_DUMP ? g_rb_gpu : g_vram_gpu, k == K_DUMP ? RB_SIZE : VRAM_SIZE}};
     dkCmdBufBindStorageBuffers(g_cmd, DkStage_Compute, 0, sb, 2);
     if (src || dst) {   // image descriptor 0 the source (a texture), 1 the destination (an image)
         u32 doff = dyn_alloc(2 * sizeof(DkImageDescriptor) + sizeof(DkSamplerDescriptor), 64);
@@ -1244,6 +1244,8 @@ static void hires_setup(void) {
     u32 a = dkImageLayoutGetAlignment(&lay), size = ((u32)dkImageLayoutGetSize(&lay) + a - 1) & ~(a - 1);
     for (int k = 0; k < HIRES_N; k++) dkImageInitialize(&g_hires_img[k], &lay, g_hires_mem, k * size);
 }
+static volatile int g_dump_req;
+static void dump_all(Surf* src, int slot);
 static void hires_capture(const u32* d, u32 outb) {
     // a whole 240 x 400 picture, not shrunk, tiled in and linear out (flags bits 1 and 5 clear)
     if (g_scale == 2 || ((d[4] >> 24) & 3) || (d[4] & 0x22) || d[2] != 0x019000F0 || d[3] != 0x019000F0) return;
@@ -1261,6 +1263,7 @@ static void hires_capture(const u32* d, u32 outb) {
     u32 q[16] = {d[4] & 1};
     q[12] = src->sw; q[13] = src->sh;
     kernel(K_HIRES, q, src->sw * src->sh, &src->img, &g_hires_img[slot]);
+    if (g_dump_req) dump_all(src, slot);
     (void)outb;
     g_hires_addr[slot] = d[1];
     g_hires_made++;
@@ -1273,6 +1276,53 @@ static void hires_written(u32 a, u32 n) {
     for (int k = 0; k < HIRES_N; k++) {
         u32 f = g_hires_addr[k];
         if (f && a < f + 240 * 400 * 3 && f < a + n) g_hires_addr[k] = 0;
+    }
+}
+// Pictures of the renderer's own images, for finding what goes wrong at a larger size: both sticks
+// pressed in sets the request (main_nx.c), and the next large top-screen picture saves the render
+// target it came from, the picture itself and the snapshots and textures of the copies.
+static char g_dump_prefix[256];
+void dkr_request_dump(const char* prefix) { snprintf(g_dump_prefix, sizeof g_dump_prefix, "%s", prefix); g_dump_req = 1; }
+static void dump_image(const DkImage* img, u32 w, u32 h, const char* name) {
+    if (!w || !h || w * h * 4 > RB_SIZE) { msr_receipt("dump: %s %ux%u too large, skipped", name, w, h); return; }
+    u32 q[16] = {0};
+    q[12] = w; q[13] = h;
+    kernel(K_DUMP, q, w * h, img, 0);
+    flush(1);
+    armDCacheFlush(g_rb_cpu, w * h * 4);
+    u8* rgb = malloc(w * h * 3);
+    if (!rgb) return;
+    const u32* px = (const u32*)g_rb_cpu;
+    unsigned sum = 0;
+    for (u32 y = 0; y < h; y++)
+        for (u32 x = 0; x < w; x++) {
+            u32 c = px[(h - 1 - y) * w + x];
+            u8* o = rgb + (y * w + x) * 3;
+            o[0] = c & 0xFF; o[1] = (c >> 8) & 0xFF; o[2] = (c >> 16) & 0xFF;
+            sum += o[0] + o[1] + o[2];
+        }
+    char path[320];
+    snprintf(path, sizeof path, "%s_%s.png", g_dump_prefix, name);
+    int msr_write_png(const char* path, const u8* rgb, u32 w, u32 h);
+    msr_write_png(path, rgb, w, h);
+    free(rgb);
+    msr_receipt("dump: %s %ux%u, mean level %u", name, w, h, sum / (w * h * 3));
+}
+static void dump_all(Surf* src, int slot) {
+    g_dump_req = 0;
+    msr_receipt("dump: scale %d, target %08X %ux%u image %ux%u", g_scale, src->addr, src->w, src->h, src->sw, src->sh);
+    dump_image(&src->img, src->sw, src->sh, "target");
+    dump_image(&g_hires_img[slot], 400 * g_scale / 2, 240 * g_scale / 2, "screen");
+    for (int k = 0; k < SHADOW_N; k++) {
+        Shadow* h = &g_shadow[k];
+        if (!h->dst) continue;
+        msr_receipt("dump: copy %d to %08X valid %d built %d tw %u rows %u fmt %u snapshot %ux%u texture h %u", k, h->dst, h->valid, h->built,
+                    h->tw, h->rows, h->fmt, h->sw, h->sh, h->tex_h);
+        char nm[32];
+        snprintf(nm, sizeof nm, "snap%d", k);
+        if (h->sw) dump_image(&h->snap, h->sw, h->sh, nm);
+        snprintf(nm, sizeof nm, "tex%d", k);
+        if (h->tex_h) dump_image(&h->tex, h->tw * h->sh / h->rows, h->tex_h * h->sh / h->rows, nm);
     }
 }
 // main_nx.c: the large picture for the top screen's framebuffer at addr, if there is a current one.
@@ -1850,10 +1900,10 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     DkMemBlockMaker mm;
     static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
                                              vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh,
-                                             vram_hires_dksh, vram_texup_dksh, vram_imgcopy_dksh};
+                                             vram_hires_dksh, vram_texup_dksh, vram_imgcopy_dksh, vram_dump_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
-                                       vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size, vram_imgcopy_dksh_size};
+                                       vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size, vram_imgcopy_dksh_size, vram_dump_dksh_size};
     u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
     u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
