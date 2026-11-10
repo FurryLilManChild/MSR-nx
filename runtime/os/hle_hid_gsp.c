@@ -423,6 +423,8 @@ static void gx_run_queue(void) {
 // takes it at the next vblank and clears dirty. The renderer will read msr_fb[].
 typedef struct { u32 left, right, stride, format; unsigned swaps; } MsrFramebuffer;
 MsrFramebuffer msr_fb[2];
+unsigned msr_frame_gaps[3];             // pictures, ones more than 18 ms after the last, more than 35 ms
+unsigned long long msr_frame_worst_ns;  // the longest gap
 unsigned msr_top_swaps(void) { return msr_fb[0].swaps; }
 
 static void latch_renderer(const GxJob* j) {
@@ -485,6 +487,18 @@ static void gsp_latch_framebuffers(void) {
                     }
                 j.nout = n;
             }
+        }
+        if (screen == 0) {   // the time between the game's top-screen pictures (speed report)
+            static unsigned long long last;
+            unsigned long long now = mono_ns();
+            if (last) {
+                unsigned long long gap = now - last;
+                msr_frame_gaps[0]++;
+                if (gap > 18000000ull) msr_frame_gaps[1]++;   // missed a 60 Hz slot
+                if (gap > 35000000ull) msr_frame_gaps[2]++;   // missed two or more
+                if (gap > msr_frame_worst_ns) msr_frame_worst_ns = gap;
+            }
+            last = now;
         }
         if (g_async) job_push(&j); else latch_renderer(&j);
     }

@@ -7,6 +7,8 @@ void msr_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void msr_receipt(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 __attribute__((noreturn)) void msr_fatal(Cpu* c, const char* why);
 void msr_log_close(void);
+extern int msr_log_buffered;   // lines kept in memory until msr_log_pump (the Switch build)
+void msr_log_pump(void);
 
 // Speed meter: time spent in the parts of the platform layer that might slow the game down. The
 // Switch build writes a line to the receipt every few seconds; the probe prints totals at the end.

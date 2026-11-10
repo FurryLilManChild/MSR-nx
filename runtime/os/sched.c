@@ -244,6 +244,7 @@ int sched_async_pending(void);   // hle_hid_gsp.c: interrupts from the graphics 
 int sched_async_deliver(void);
 int sched_async_busy(void);
 unsigned long long msr_idle_ns;  // time with every guest thread waiting (speed report)
+unsigned long long msr_idle_gx_ns;  // the part of it with the graphics thread still at work
 void sched_switch(void) {
     GThread* me = g_cur;
     for (;;) {
@@ -280,7 +281,10 @@ void sched_switch(void) {
                     u64 d = target - g_now_ns;
                     if (d > 500000) d = 500000;
                     struct timespec ts = {0, (long)d};
+                    int gx = sched_async_busy();
+                    u64 s0 = gx ? wall_ns() : 0;
                     nanosleep(&ts, 0);
+                    if (gx) msr_idle_gx_ns += wall_ns() - s0;
                     rt_update();
                 }
                 msr_idle_ns += wall_ns() - w0;

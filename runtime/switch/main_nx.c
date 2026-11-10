@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.5.0 + graphics thread test"
+#define MSR_VERSION "0.5.0 + 60fps finish test"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -768,6 +768,7 @@ int main(int argc, char** argv) {
         }
     }
     msr_log_open(g_run_dir);
+    msr_log_buffered = 1;   // the main loop writes the logs out; the game's threads never wait on the SD card
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
     msr_receipt("MSR-nx " MSR_VERSION " (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
@@ -828,10 +829,12 @@ int main(int argc, char** argv) {
     void dkr_force_general(int vs, int fs);
     if (g_gpu_render) dkr_force_general(0, 0);   // the shader pack, with the general shaders only for misses
     msr_thread_to_core(2);
+    unsigned long long next_pump = 0;
     while (appletMainLoop()) {
         input_poll();
         present();
         unsigned long long now = msr_now_ns();
+        if (now >= next_pump) { msr_log_pump(); next_pump = now + 1000000000ull; }
         if (now >= next_report) {
             // the speed meter: the real 3DS shows up to 60 pictures a second on the top screen
             double secs = (now - next_report + 5000000000ull) / 1e9;
@@ -879,13 +882,21 @@ int main(int argc, char** argv) {
                             vo[0], vo[1] + vo[8], vo[8], vo[2] + vo[7], vo[7], vo[3], vo[4], vo[5]);
                 {
                     {   // the game's threads waiting for something (idle) and the graphics thread at work
-                    extern unsigned long long msr_idle_ns, msr_gx_busy_ns;
+                    extern unsigned long long msr_idle_ns, msr_idle_gx_ns, msr_gx_busy_ns, msr_frame_worst_ns;
+                    extern unsigned msr_frame_gaps[3];
                     extern volatile int msr_gx_async;
-                    static unsigned long long i0, b0;
-                    unsigned long long i1 = msr_idle_ns, b1 = msr_gx_busy_ns;
-                    msr_receipt("  threads per 5 s: game idle %llu ms, graphics thread busy %llu ms (graphics thread %s)",
-                                (i1 - i0) / 1000000ull, (b1 - b0) / 1000000ull, msr_gx_async ? "on" : "off");
-                    i0 = i1; b0 = b1;
+                    static unsigned long long i0, g0, b0;
+                    static unsigned f0[3];
+                    unsigned long long i1 = msr_idle_ns, g1 = msr_idle_gx_ns, b1 = msr_gx_busy_ns;
+                    msr_receipt("  threads per 5 s: game idle %llu ms (%llu of it waiting for the graphics thread, %llu for the screen or a timer), graphics thread busy %llu ms (graphics thread %s)",
+                                (i1 - i0) / 1000000ull, (g1 - g0) / 1000000ull, ((i1 - i0) - (g1 - g0)) / 1000000ull,
+                                (b1 - b0) / 1000000ull, msr_gx_async ? "on" : "off");
+                    unsigned fg[3] = {msr_frame_gaps[0], msr_frame_gaps[1], msr_frame_gaps[2]};
+                    msr_receipt("  game frames: %u, %u of them late (missed a 60 Hz slot), %u missed two or more; longest %.1f ms",
+                                fg[0] - f0[0], fg[1] - f0[1], fg[2] - f0[2], msr_frame_worst_ns / 1e6);
+                    msr_frame_worst_ns = 0;
+                    for (int k = 0; k < 3; k++) f0[k] = fg[k];
+                    i0 = i1; g0 = g1; b0 = b1;
                 }
                 unsigned dkr_hires_count(void), dkr_shadow_count(void);
                     msr_receipt("  3D screen resolution: %u pictures made at the larger size, %u shown from them, %u at native size; %u textures read at the larger size",

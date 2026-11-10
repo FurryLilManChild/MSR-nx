@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-10 (later): graphics thread results, 60fps finish test
+
+- run001 (graphics thread test, docked, CPU 1785, GPU 768): 54 to 59 pictures a second at 1x
+  (about 30 before), the same at 1.5x with the GPU nearly full (idle 355 ms of 5 s), 16 to 41 at 2x.
+  Handheld stock (GPU 307): 32 to 39 with the GPU busy 98%: handheld 60 needs about 40% less GPU
+  work, a separate project.
+- At 1x nothing was full (game idle a third, graphics thread busy 40%, GPU idle 40%), so a few
+  frames a second run long and miss the 60 Hz slot. Suspect, not a diagnosis: 15,156 receipt lines
+  "service: APT:A -> handle 126" (the game opens APT:A every frame), each written and flushed to the
+  SD card on the game's thread.
+- 60fps finish test: receipt and msr.log lines are kept in memory and written by the main loop once
+  a second (msr_log_buffered, msr_log_pump); each service is logged once. New report lines: game
+  idle split into waiting for the graphics thread and waiting for the screen or a timer; game
+  frames, how many missed a 60 Hz slot, the longest gap.
+
 ## 2026-11-10 (morning): 60 fps runs read, the graphics thread
 
 - The 60 fps sessions were in run007 and run018 (the 0.5.0 log clean-up bug, fixed). At 60 the

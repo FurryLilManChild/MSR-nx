@@ -42,7 +42,16 @@ int svc_srv(Ipc* q) {
         char name[9] = {0};
         for (int k = 0; k < 8; k++) name[k] = (char)rd8(q->buf + 4 + k);
         u32 h = k_new(OBJ_SESSION, name);
-        msr_receipt("service: %s -> handle %X", name, h);
+        {   // each service once: the game opens some every frame (APT:A, 100 lines a second)
+            static char seen[32][9];
+            static int nseen;
+            int known = 0;
+            for (int k = 0; k < nseen; k++) if (!strcmp(seen[k], name)) known = 1;
+            if (!known) {
+                if (nseen < 32) strcpy(seen[nseen++], name);
+                msr_receipt("service: %s -> handle %X (opened again later without a line)", name, h);
+            }
+        }
         ipc_set(q, 0, IPC_HDR(0x0005, 1, 2));
         ipc_set(q, 1, 0);
         ipc_set(q, 2, 0x10);  // move-handle descriptor, one handle
