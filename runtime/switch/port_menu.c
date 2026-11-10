@@ -13,6 +13,7 @@ void dkr_set_img_path(int on);    // gpu/dk/dk_pica.c
 void dkr_set_scale(int halves);   // gpu/dk/dk_pica.c
 extern volatile u32 msr_frame_limit_ms;   // os/sched.c
 extern volatile int msr_fps60;
+extern volatile int msr_gx_async;   // os/hle_hid_gsp.c
 static void fps_apply(void) { msr_frame_limit_ms = g_set.fps60 ? 16 : 33; msr_fps60 = g_set.fps60; }
 
 PortSettings g_set;
@@ -47,7 +48,7 @@ static const char* sw_name(u64 b) {
     return "(none)";
 }
 
-enum { ROW_LAYOUT, ROW_SCALE, ROW_RATE, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
+enum { ROW_LAYOUT, ROW_SCALE, ROW_RATE, ROW_GXT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 
 // ---- clocks -----------------------------------------------------------------------------------------
 // The clocks the system had when the port first changed one, put back when the port exits.
@@ -102,7 +103,7 @@ static void save(void) {
     // written in place: the SD card cannot rename over an existing file (learned on MPH-nx)
     FILE* f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\nscale=%d\nfps60=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies, g_set.scale, g_set.fps60);
+    fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\nscale=%d\nfps60=%d\ngxthread=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies, g_set.scale, g_set.fps60, g_set.gxthread);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -128,6 +129,7 @@ void port_menu_init(const char* settings_path) {
             else if (sscanf(line, "copies=%d", &v) == 1) g_set.copies = v != 0;
             else if (sscanf(line, "scale=%d", &v) == 1 && v >= 0 && v < 3) g_set.scale = v;
             else if (sscanf(line, "fps60=%d", &v) == 1) g_set.fps60 = v != 0;
+            else if (sscanf(line, "gxthread=%d", &v) == 1) g_set.gxthread = v != 0;
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
         fclose(f);
@@ -137,6 +139,7 @@ void port_menu_init(const char* settings_path) {
     dkr_set_img_path(!g_set.copies);
     dkr_set_scale(2 + g_set.scale);
     fps_apply();
+    msr_gx_async = !g_set.gxthread;
     msr_receipt("menu: settings %s: layout %s, CPU clock %s", found ? "loaded" : "default", k_layout_names[g_set.layout],
                 k_clock_names[g_set.clock]);
     if (g_set.clock != CLOCK_STOCK) clock_apply();
@@ -185,6 +188,7 @@ static void draw(void) {
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
         else if (r == ROW_GPU) { label = "GPU clock"; snprintf(v, sizeof v, "< %s >", k_gpu_names[g_set.gpu]); }
         else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
+        else if (r == ROW_GXT) { label = "Graphics thread (test)"; snprintf(v, sizeof v, "< %s >", g_set.gxthread ? "Off" : "On"); }
         else if (r == ROW_RATE) { label = "Frame rate (test)"; snprintf(v, sizeof v, "< %s >", g_set.fps60 ? "60" : "30 (3DS)"); }
         else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
         else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
@@ -247,6 +251,12 @@ u32 port_menu_input(u64 held) {
             g_set.copies = !g_set.copies;
             dkr_set_img_path(!g_set.copies);
             msr_receipt("menu: copies %s", g_set.copies ? "through VRAM" : "from images");
+            g_dirty = 1;
+        }
+        if ((dx || (down & HidNpadButton_A)) && g_row == ROW_GXT) {
+            g_set.gxthread = !g_set.gxthread;
+            msr_gx_async = !g_set.gxthread;
+            msr_receipt("menu: graphics thread %s", g_set.gxthread ? "off" : "on");
             g_dirty = 1;
         }
         if ((dx || (down & HidNpadButton_A)) && g_row == ROW_RATE) {

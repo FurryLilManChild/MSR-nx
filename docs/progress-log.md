@@ -1,5 +1,21 @@
 # Progress log (newest first)
 
+## 2026-11-10 (morning): 60 fps runs read, the graphics thread
+
+- The 60 fps sessions were in run007 and run018 (the 0.5.0 log clean-up bug, fixed). At 60 the
+  game mostly made 30 with stretches of 40 to 55, CPU 1785 and GPU 768 MHz, and the GPU idle about
+  60 to 65% of the time: not the GPU.
+- Every guest thread and the translation of the game's GX commands ran one after another on core
+  0 (the baton), and the main thread (screens, input) was on core 0 too. Now: GX commands (PICA
+  lists, transfers, copies, fills, DMA) and the renderer's half of the framebuffer latch go in
+  order through a queue to a graphics thread on core 1; their interrupts come back through a ring
+  and are delivered whenever a guest thread switches or waits (the idle wait now sleeps in 0.5 ms
+  steps). msr_fb is set in order with the drawing. Main thread and sound on core 2.
+- Port menu "Graphics thread (test)": On (default) or Off. The receipt adds, per 5 s, the game's
+  idle time and the graphics thread's busy time.
+- Probe with MSR_GXASYNC=1, 240 s of play: 0 of 75 sampled top pictures differ from the run
+  without it.
+
 ## 2026-11-09 (night, 2): 60 fps test build
 
 - The game advances by the measured time between frames (msr2ds src/msr/frame_rate.h, read as

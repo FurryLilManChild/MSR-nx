@@ -240,12 +240,22 @@ static void pause_point(void) {
     g_rt_start += wall_ns() - t0;
 }
 
+int sched_async_pending(void);   // hle_hid_gsp.c: interrupts from the graphics thread
+int sched_async_deliver(void);
+int sched_async_busy(void);
+unsigned long long msr_idle_ns;  // time with every guest thread waiting (speed report)
 void sched_switch(void) {
     GThread* me = g_cur;
     for (;;) {
         pause_point();
+        sched_async_deliver();
         GThread* next = pick();
         if (me->state == T_READY && (!next || next->prio > me->prio || next == me)) next = me;
+        if (!next && !sched_realtime && (sched_async_busy() || sched_async_pending())) {
+            // the probe's own clock: wait for the graphics thread before moving time on
+            while (sched_async_busy()) { struct timespec ts = {0, 100000}; nanosleep(&ts, 0); }
+            continue;
+        }
         if (!next) {
             // Nothing ready: jump the clock to the earliest timeout.
             u64 soonest = 0;
@@ -263,12 +273,18 @@ void sched_switch(void) {
             u64 target = soonest && (!tn || soonest < tn) ? soonest : tn;
             if (sched_realtime && target) {   // sleep (holding the baton: nothing else can run) until then
                 rt_update();
-                if (target > g_now_ns) {
+                int woken = 0;
+                u64 w0 = wall_ns();
+                while (target > g_now_ns) {   // in short steps: the graphics thread may finish something first
+                    if (sched_async_pending()) { woken = 1; break; }
                     u64 d = target - g_now_ns;
-                    struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
+                    if (d > 500000) d = 500000;
+                    struct timespec ts = {0, (long)d};
                     nanosleep(&ts, 0);
+                    rt_update();
                 }
-                rt_update();
+                msr_idle_ns += wall_ns() - w0;
+                if (woken) continue;   // deliver it and see who is ready
                 if (g_now_ns < target) g_now_ns = target;
             }
             if (tn && (!soonest || tn < soonest)) {

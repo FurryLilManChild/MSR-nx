@@ -11,6 +11,8 @@
 #include "msr_log.h"
 #include "sched.h"
 #include "pica.h"
+#include <pthread.h>
+#include <time.h>
 
 static u32 g_hid_mem, g_hid_events[5];
 static u32 g_gsp_mem, g_gsp_event;
@@ -145,7 +147,61 @@ static u32 gsp_shared(void) {
     return o ? o->addr : 0;
 }
 
+// ---- the graphics thread ----------------------------------------------------------------------
+// On the 3DS the GPU works through the game's GX commands while the CPU goes on with the game.
+// Here the same: the commands go to a host thread of their own (on its own core), which runs them
+// in order (PICA command lists through the renderer, transfers, copies, fills, DMA) and hands the
+// completion interrupts back; the guest side delivers them in order whenever it switches threads
+// or waits. The framebuffer latch's renderer half goes through the same queue so it stays in
+// order with the drawing. msr_gx_async (main_nx.c, the port menu) turns it on; the probe keeps
+// everything on the guest thread.
+volatile int msr_gx_async;            // wanted
+static int g_async;                   // in use (changed only with the queue empty)
+static __thread int t_worker;         // this host thread is the graphics thread
+enum { JOB_GX, JOB_LATCH };
+typedef struct { u32 kind, id, d[7]; u32 screen, left, right, stride, format, lv, rv, nout; u32 out[16]; } GxJob;
+#define JOBS 1024
+static GxJob g_jobs[JOBS];
+static volatile u32 g_job_head, g_job_tail;   // head: next to write (guest), tail: next to run (worker)
+static volatile int g_worker_busy;
+static pthread_mutex_t g_job_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_job_cv = PTHREAD_COND_INITIALIZER;
+#define IRQS 1024
+static volatile u8 g_irq_ring[IRQS];
+static volatile u32 g_irq_head, g_irq_tail;   // head: worker writes, tail: guest delivers
+unsigned long long msr_gx_busy_ns;            // the graphics thread's time on commands (speed report)
+static unsigned long long mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (unsigned long long)t.tv_sec * 1000000000ull + t.tv_nsec; }
+
+static void gsp_interrupt_now(int id);
 static void gsp_interrupt(int id) {
+    if (t_worker) {   // the guest side delivers it
+        u32 h = g_irq_head;
+        while (h - __atomic_load_n(&g_irq_tail, __ATOMIC_ACQUIRE) >= IRQS) { struct timespec ts = {0, 100000}; nanosleep(&ts, 0); }
+        g_irq_ring[h % IRQS] = (u8)id;
+        __atomic_store_n(&g_irq_head, h + 1, __ATOMIC_RELEASE);
+        return;
+    }
+    gsp_interrupt_now(id);
+}
+// sched.c: interrupts finished on the graphics thread, delivered on the guest side; 1 if any.
+// the graphics thread still has queued work or is at it
+int sched_async_busy(void) {
+    return __atomic_load_n(&g_job_head, __ATOMIC_ACQUIRE) != __atomic_load_n(&g_job_tail, __ATOMIC_ACQUIRE) || g_worker_busy;
+}
+int sched_async_pending(void) { return __atomic_load_n(&g_irq_head, __ATOMIC_ACQUIRE) != g_irq_tail; }
+int sched_async_deliver(void) {
+    int n = 0;
+    while (sched_async_pending()) {
+        u32 t = g_irq_tail;
+        int id = g_irq_ring[t % IRQS];
+        __atomic_store_n(&g_irq_tail, t + 1, __ATOMIC_RELEASE);
+        gsp_interrupt_now(id);
+        n++;
+    }
+    return n;
+}
+
+static void gsp_interrupt_now(int id) {
     u32 qa = gsp_shared();
     if (!qa || !g_gsp_event) return;
     u32 index = rd8(qa), count = rd8(qa + 1);
@@ -276,6 +332,72 @@ void gx_execute(u32 id, u32* d) {
     }
 }
 
+static void latch_renderer(const GxJob* j);
+static void job_run(const GxJob* j) {
+    if (j->kind == JOB_GX) {
+        u32 d[7];
+        memcpy(d, j->d, sizeof d);
+        msr_capture_gx(j->id, d);
+        gx_execute(j->id, d);
+    } else latch_renderer(j);
+}
+static void* gx_worker(void* arg) {
+    (void)arg;
+    t_worker = 1;
+#ifdef __SWITCH__
+    { extern void msr_thread_to_core(int core); msr_thread_to_core(1); }
+#endif
+    for (;;) {
+        pthread_mutex_lock(&g_job_mu);
+        while (__atomic_load_n(&g_job_head, __ATOMIC_ACQUIRE) == g_job_tail) { g_worker_busy = 0; pthread_cond_wait(&g_job_cv, &g_job_mu); }
+        g_worker_busy = 1;
+        pthread_mutex_unlock(&g_job_mu);
+        unsigned long long t0 = mono_ns();
+        while (__atomic_load_n(&g_job_head, __ATOMIC_ACQUIRE) != g_job_tail) {
+            job_run(&g_jobs[g_job_tail % JOBS]);
+            __atomic_store_n(&g_job_tail, g_job_tail + 1, __ATOMIC_RELEASE);
+        }
+        msr_gx_busy_ns += mono_ns() - t0;
+    }
+    return 0;
+}
+static void job_push(const GxJob* j) {
+    static int started;
+    if (!started) {
+        started = 1;
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, 8u << 20);
+        pthread_t th;
+        pthread_create(&th, &at, gx_worker, 0);
+    }
+    while (__atomic_load_n(&g_job_head, __ATOMIC_ACQUIRE) - __atomic_load_n(&g_job_tail, __ATOMIC_ACQUIRE) >= JOBS) {
+        sched_async_deliver();
+        struct timespec ts = {0, 100000};
+        nanosleep(&ts, 0);
+    }
+    g_jobs[g_job_head % JOBS] = *j;
+    __atomic_store_n(&g_job_head, g_job_head + 1, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&g_job_mu);
+    pthread_cond_signal(&g_job_cv);
+    pthread_mutex_unlock(&g_job_mu);
+}
+// Waits for the graphics thread to finish everything queued (and delivers its interrupts).
+static void gx_drain(void) {
+    while (__atomic_load_n(&g_job_head, __ATOMIC_ACQUIRE) != __atomic_load_n(&g_job_tail, __ATOMIC_ACQUIRE) || g_worker_busy) {
+        struct timespec ts = {0, 200000};
+        nanosleep(&ts, 0);
+    }
+    sched_async_deliver();
+}
+static void async_mode_check(void) {
+    if (msr_gx_async != g_async) {   // only with nothing queued
+        if (g_async) gx_drain();
+        g_async = msr_gx_async;
+        msr_receipt("gpu: graphics thread %s", g_async ? "on (GX commands run on their own core)" : "off (on the game's thread)");
+    }
+}
+
 static void gx_run_queue(void) {
     u32 base = gsp_shared();
     if (!base) return;
@@ -285,7 +407,12 @@ static void gx_run_queue(void) {
         if (!count) break;
         u32 entry = ring + 0x20 + (index % 15) * 0x20;
         wr32(ring, (ctl & 0xFFFF0000u) | ((index + 1) % 15) | ((count - 1) << 8));
-        gx_command(entry);
+        async_mode_check();
+        if (g_async) {
+            GxJob j = {JOB_GX, rd32(entry) & 0xFF};
+            for (int k = 0; k < 7; k++) j.d[k] = rd32(entry + 4 + 4 * k);
+            job_push(&j);
+        } else gx_command(entry);
     }
 }
 
@@ -298,6 +425,23 @@ typedef struct { u32 left, right, stride, format; unsigned swaps; } MsrFramebuff
 MsrFramebuffer msr_fb[2];
 unsigned msr_top_swaps(void) { return msr_fb[0].swaps; }
 
+static void latch_renderer(const GxJob* j) {
+    int screen = (int)j->screen;
+    MsrFramebuffer* f = &msr_fb[screen];
+    if (screen == 0) eye_note_framebuffers(j->lv, j->rv);
+    f->left = j->left; f->right = j->right; f->stride = j->stride; f->format = j->format;
+    if (f->swaps < 4)
+        msr_log("gsp: screen %d shows %08X (stride %u, format %X)", screen, f->left, f->stride, f->format);
+    pica_frame_shown(screen, f->left, f->stride, f->format);
+    if (pica_latch_hook) pica_latch_hook(screen);
+    __atomic_add_fetch(&f->swaps, 1, __ATOMIC_RELEASE);
+    if (screen == 0) {
+        msr_capture_latch();
+        fp_frame_end(j->out, j->nout);
+        eye_frame_end();
+    }
+}
+
 static void gsp_latch_framebuffers(void) {
     u32 base = gsp_shared();
     if (!base) return;
@@ -306,46 +450,43 @@ static void gsp_latch_framebuffers(void) {
         u32 hdr = rd32(rec);
         if (!(hdr & 0xFF00)) continue;
         u32 e = rec + 4 + 0x1C * (hdr & 1);
-        msr_fb[screen].left = rd32(e + 4);
-        msr_fb[screen].right = rd32(e + 8);
-        if (screen == 0) {
-            u32 lv = pica_vaddr(msr_fb[0].left), rv = pica_vaddr(msr_fb[0].right);
-            eye_note_framebuffers(lv ? lv : msr_fb[0].left, rv ? rv : msr_fb[0].right);
-        }
-        msr_fb[screen].stride = rd32(e + 12);
-        msr_fb[screen].format = rd32(e + 16);
-        if (msr_fb[screen].swaps++ < 4)
-            msr_log("gsp: screen %d shows %08X (stride %u, format %X)", screen, msr_fb[screen].left,
-                    msr_fb[screen].stride, msr_fb[screen].format);
+        // the guest's view (g_fbg); msr_fb, which the renderer and the Switch's screens read, is
+        // set by latch_renderer in order with the drawing
+        static MsrFramebuffer g_fbg[2];
+        g_fbg[screen].left = rd32(e + 4);
+        g_fbg[screen].right = rd32(e + 8);
+        g_fbg[screen].stride = rd32(e + 12);
+        g_fbg[screen].format = rd32(e + 16);
         wr8(rec + 1, 0);
-        pica_frame_shown(screen, msr_fb[screen].left, msr_fb[screen].stride, msr_fb[screen].format);
-        if (pica_latch_hook) pica_latch_hook(screen);
-        if (screen == 0) msr_capture_latch();
+        GxJob j = {JOB_LATCH};
+        j.screen = screen; j.left = g_fbg[screen].left; j.right = g_fbg[screen].right;
+        j.stride = g_fbg[screen].stride; j.format = g_fbg[screen].format;
+        if (screen == 0) {
+            u32 lv = pica_vaddr(j.left), rv = pica_vaddr(j.right);
+            j.lv = lv ? lv : j.left; j.rv = rv ? rv : j.right;
+        }
         {
             // what the Switch shows: the left image of each screen, in every buffer the game has
             // shown it in (games double-buffer, so the next picture goes to the one not shown now)
             static u32 seen[2][4], nseen[2];
-            u32 a = msr_fb[screen].left, v = pica_vaddr(a), bytes;
+            u32 a = g_fbg[screen].left, v = pica_vaddr(a);
             if (v) a = v;
-            bytes = (screen ? 320u : 400u) * (msr_fb[screen].stride ? msr_fb[screen].stride : 240 * 3);
             int known = 0;
             for (u32 k = 0; k < nseen[screen]; k++) if (seen[screen][k] == a) known = 1;
             if (!known && a && nseen[screen] < 4) seen[screen][nseen[screen]++] = a;
             if (screen == 0) {
-                u32 out[16];
                 unsigned n = 0;
                 for (int sc = 0; sc < 2; sc++)
                     for (u32 k = 0; k < nseen[sc]; k++) {
-                        u32 b = (sc ? 320u : 400u) * (msr_fb[sc].stride ? msr_fb[sc].stride : 240 * 3);
-                        out[2 * n] = seen[sc][k];
-                        out[2 * n + 1] = seen[sc][k] + b;
+                        u32 b = (sc ? 320u : 400u) * (g_fbg[sc].stride ? g_fbg[sc].stride : 240 * 3);
+                        j.out[2 * n] = seen[sc][k];
+                        j.out[2 * n + 1] = seen[sc][k] + b;
                         n++;
                     }
-                fp_frame_end(out, n);
-                eye_frame_end();
+                j.nout = n;
             }
-            (void)bytes;
         }
+        if (g_async) job_push(&j); else latch_renderer(&j);
     }
 }
 

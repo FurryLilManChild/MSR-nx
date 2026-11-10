@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.5.0 + 60 fps test"
+#define MSR_VERSION "0.5.0 + graphics thread test"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -49,6 +49,13 @@ extern MsrFramebuffer msr_fb[2];
 // ---- the game ------------------------------------------------------------------------------------
 
 static Cpu* g_main_cpu;
+// Moves the calling thread to one CPU core: the game's threads stay on core 0, the graphics
+// thread (os/hle_hid_gsp.c) goes to core 1, the screens, input and sound to core 2.
+void msr_thread_to_core(int core) {
+    Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+    if (R_FAILED(rc)) msr_receipt("core: could not move a thread to core %d (%08X)", core, rc);
+}
+
 static void* game_main(void* arg) {
     (void)arg;
     void sched_enter_main(void);
@@ -534,6 +541,7 @@ static s16* g_adata[3];
 
 static void* audio_thread(void* arg) {
     (void)arg;
+    msr_thread_to_core(2);
     u32 size = (AUD_SAMPLES * 4 + 0xFFF) & ~0xFFFu;
     for (int k = 0; k < 3; k++) {
         g_adata[k] = (s16*)memalign(0x1000, size);
@@ -819,6 +827,7 @@ int main(int argc, char** argv) {
     unsigned long long shot_at = g_debug ? g_start_ns + 5000000000ull : 0;
     void dkr_force_general(int vs, int fs);
     if (g_gpu_render) dkr_force_general(0, 0);   // the shader pack, with the general shaders only for misses
+    msr_thread_to_core(2);
     while (appletMainLoop()) {
         input_poll();
         present();
@@ -869,7 +878,16 @@ int main(int argc, char** argv) {
                 msr_receipt("  VRAM on the GPU: %u fills, %u copies (%u from images), %u transfers (%u from images), %u stores, %u loads, %u texture decodes",
                             vo[0], vo[1] + vo[8], vo[8], vo[2] + vo[7], vo[7], vo[3], vo[4], vo[5]);
                 {
-                    unsigned dkr_hires_count(void), dkr_shadow_count(void);
+                    {   // the game's threads waiting for something (idle) and the graphics thread at work
+                    extern unsigned long long msr_idle_ns, msr_gx_busy_ns;
+                    extern volatile int msr_gx_async;
+                    static unsigned long long i0, b0;
+                    unsigned long long i1 = msr_idle_ns, b1 = msr_gx_busy_ns;
+                    msr_receipt("  threads per 5 s: game idle %llu ms, graphics thread busy %llu ms (graphics thread %s)",
+                                (i1 - i0) / 1000000ull, (b1 - b0) / 1000000ull, msr_gx_async ? "on" : "off");
+                    i0 = i1; b0 = b1;
+                }
+                unsigned dkr_hires_count(void), dkr_shadow_count(void);
                     msr_receipt("  3D screen resolution: %u pictures made at the larger size, %u shown from them, %u at native size; %u textures read at the larger size",
                                 dkr_hires_count(), g_hires_shown, g_native_shown, dkr_shadow_count());
                     g_hires_shown = g_native_shown = 0;

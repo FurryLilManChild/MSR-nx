@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
         extern unsigned msr_frame_every;
         const char* e = getenv("MSR_SECONDS");
         if (e) msr_time_limit_ns = (u64)atoi(e) * 1000000000ull;
+        if (getenv("MSR_GXASYNC")) { extern volatile int msr_gx_async; msr_gx_async = 1; }   // the graphics thread
         if (getenv("MSR_FPS60")) {   // the port menu's 60 fps (os/sched.c)
             extern volatile u32 msr_frame_limit_ms;
             extern volatile int msr_fps60;
