@@ -2179,3 +2179,89 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
 void dkr_present_sync(void) {
     if (g_draws_since_flush) flush(0);
 }
+
+// ---- self-test: the scaler's GPU steps against the same code on the CPU ---------------------------
+// Run 24: the large textures came out wrong on the Switch though vram_ops_test passes on a PC. Each
+// step here runs on the GPU and (vram_ref.cpp) on the CPU from the same pattern, and the receipt
+// says where they first differ.
+void vref_setup(const u32 qq[16], u32* vram, const u32* src, u32 src_w, u32* dst, u32 dst_w, u32* out);
+int vref_run(const char* name, u32 n);
+static u32 sc_rng = 12345;
+static u32 sc_rand(void) { sc_rng = sc_rng * 1103515245u + 12345u; return sc_rng; }
+// image -> u32 rows (image row 0 first) through the readback buffer
+static const u32* sc_read(const DkImage* img, u32 w, u32 h) {
+    u32 q[16] = {0};
+    q[12] = w; q[13] = h;
+    kernel(K_DUMP, q, w * h, img, 0);
+    flush(1);
+    armDCacheFlush(g_rb_cpu, w * h * 4);
+    return (const u32*)g_rb_cpu;
+}
+static void sc_compare(const char* what, const u32* gpu, const u32* cpu, u32 w, u32 h) {
+    u32 bad = 0, fx = 0, fy = 0, gv = 0, cv = 0;
+    for (u32 y = 0; y < h; y++)
+        for (u32 x = 0; x < w; x++)
+            if (gpu[y * w + x] != cpu[y * w + x]) {
+                if (!bad) { fx = x; fy = y; gv = gpu[y * w + x]; cv = cpu[y * w + x]; }
+                bad++;
+            }
+    if (!bad) msr_receipt("scaler self-test: %s: same on the GPU and the CPU (%ux%u)", what, w, h);
+    else msr_receipt("scaler self-test: %s: %u of %u pixels differ; first at %u,%u (GPU %08X, CPU %08X)", what, bad, w * h, fx, fy, gv, cv);
+}
+void dkr_scaler_selftest(void) {
+    if (!g_shadow_mem) return;
+    for (int sc = 3; sc <= 4; sc++) {
+        u32 sw = 240 * sc / 2, sh = 400 * sc / 2, tw = 256, th = 512, TW = tw * sc / 2, TH = th * sc / 2;
+        DkImage A, B, T;
+        if (!shadow_image(&A, 4 * SHADOW_SLOT, sw, sh, SHADOW_SLOT / 2) || !shadow_image(&B, 4 * SHADOW_SLOT + SHADOW_SLOT / 2, sw, sh, SHADOW_SLOT / 2) ||
+            !shadow_image(&T, 5 * SHADOW_SLOT, TW, TH, SHADOW_SLOT / 2)) {
+            msr_receipt("scaler self-test: images did not fit"); return;
+        }
+        u32* pat = malloc(sw * sh * 4);
+        u32* ref = malloc(TW * TH * 4);
+        u32* got = malloc(TW * TH * 4);
+        if (!pat || !ref || !got) { free(pat); free(ref); free(got); return; }
+        for (u32 i = 0; i < sw * sh; i++) pat[i] = sc_rand() ^ (sc_rand() >> 16);
+        // the pattern into A the way the renderer uploads pictures
+        u32 off = dyn_alloc(sw * sh * 4, 256);
+        memcpy(g_dyn_cpu + off, pat, sw * sh * 4);
+        DkImageView av;
+        dkImageViewDefaults(&av, &A);
+        DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
+        DkImageRect r = {0, 0, 0, sw, sh, 1};
+        dkCmdBufCopyBufferToImage(g_cmd, &cb, &av, &r, 0);
+        GPU_WORK();
+        gpu_barrier();
+        char what[64];
+        snprintf(what, sizeof what, "upload and read back, %d.%dx", sc / 2, sc & 1 ? 5 : 0);
+        sc_compare(what, sc_read(&A, sw, sh), pat, sw, sh);
+        // the snapshot
+        u32 q[16] = {0};
+        q[12] = sw; q[13] = sh;
+        kernel(K_IMGCOPY, q, sw * sh, &A, &B);
+        snprintf(what, sizeof what, "snapshot (imgcopy), %d.%dx", sc / 2, sc & 1 ? 5 : 0);
+        sc_compare(what, sc_read(&B, sw, sh), pat, sw, sh);
+        // the large texture
+        u32 q2[16] = {tw, th, 0, 400};
+        q2[12] = sw; q2[13] = sh;
+        kernel(K_TEXUP, q2, TW * TH, &B, &T);
+        const u32* g = sc_read(&T, TW, TH);
+        memcpy(got, g, TW * TH * 4);
+        vref_setup(q2, 0, pat, sw, ref, TW, 0);
+        vref_run("texup", TW * TH);
+        snprintf(what, sizeof what, "large texture (texup), %d.%dx", sc / 2, sc & 1 ? 5 : 0);
+        sc_compare(what, got, ref, TW, TH);
+        // the screen picture
+        if (!shadow_image(&T, 5 * SHADOW_SLOT, sh, sw, SHADOW_SLOT / 2)) { free(pat); free(ref); free(got); return; }
+        u32 q3[16] = {0};
+        q3[12] = sw; q3[13] = sh;
+        kernel(K_HIRES, q3, sw * sh, &A, &T);
+        g = sc_read(&T, sh, sw);
+        memcpy(got, g, sw * sh * 4);
+        vref_setup(q3, 0, pat, sw, ref, sh, 0);
+        vref_run("hires", sw * sh);
+        snprintf(what, sizeof what, "screen picture (hires), %d.%dx", sc / 2, sc & 1 ? 5 : 0);
+        sc_compare(what, got, ref, sh, sw);
+        free(pat); free(ref); free(got);
+    }
+}

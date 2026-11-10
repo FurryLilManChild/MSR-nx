@@ -715,7 +715,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 22 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 23 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -741,6 +741,8 @@ int main(int argc, char** argv) {
         char st_png[300];
         snprintf(st_png, sizeof st_png, "%s/selftest.png", g_run_dir);
         dkr_selftest(msr_fsrec_data, msr_fsrec_data ? (size_t)(msr_fsrec_end - msr_fsrec_data) : 0, st_png);
+        void dkr_scaler_selftest(void);
+        dkr_scaler_selftest();
         g_gpu_render = 1;
     }
     if (R_SUCCEEDED(audoutInitialize()) && R_SUCCEEDED(audoutStartAudioOut())) {

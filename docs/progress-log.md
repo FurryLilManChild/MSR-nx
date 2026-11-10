@@ -1,5 +1,15 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 6): run 24 read, test 23 (scaler self-test)
+
+- Run 24 (test 22) pictures: the large textures do not match their snapshots (a 1.5x copy's
+  texture: content shifted and repeated vertically, mean differences of 5 to 11 levels against
+  the snapshot placed where k_texup should put it), and the game's later passes compound that
+  into dark, banded screens. vram_ops_test passes the same code on a PC.
+- Test 23: at start, the scaler's GPU steps (upload, imgcopy, texup, hires) run on a random
+  pattern on the GPU and the same code runs on the Switch's CPU (vram_ref.cpp includes
+  vram_ops.inc); the receipt says per step whether they match and where they first differ.
+
 ## 2026-11-09 (late, 5): run 23 read, test 22 (scaler diagnostics)
 
 - Run 23 (test 21): still dark at 1.5x and 2x, so the copy engine was not the cause.

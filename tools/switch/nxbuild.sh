@@ -11,6 +11,7 @@ for f in cpu/dispatch.c os/log.c os/mem.c os/svc.c os/kernel.c os/boot.c os/hle_
   if [ "$f" = "gpu/dk/dk_pica.c" ] || [ "$f" = "switch/main_nx.c" ]; then while [ ! -f nxout/dk_shaders.h ]; do sleep 1; done; fi
   aarch64-none-elf-gcc $CFLAGS -c /r/$f -o nxrt/$(basename $f .c).o
 done
+aarch64-none-elf-g++ $CFLAGS -fno-exceptions -fno-rtti -I/r/gpu/dk -c /r/gpu/dk/vram_ref.cpp -o nxrt/vram_ref.o
 echo RUNTIME-OK
 if [ "$1" = "link" ]; then
   # the shader pack (made from game data, never committed) goes inside msr.nro when there is one
@@ -30,7 +31,7 @@ if [ "$1" = "link" ]; then
   UAMLIB=""
   if [ -f libuam.a ]; then UAMLIB="libuam.a"; fi
   aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections -o nxout/msr.elf nxrt/*.o nxobj/*.o $PACKOBJ $UAMLIB -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm -lstdc++
-  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test22" nxout/msr.nacp
+  nacptool --create "Metroid Samus Returns NX" "MSR-nx" "0.1-test23" nxout/msr.nacp
   elf2nro nxout/msr.elf nxout/msr.nro --nacp=nxout/msr.nacp
   ls -la nxout/msr.nro
 fi
