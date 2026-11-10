@@ -442,6 +442,35 @@ int main() {
             for (u32 Y = 0; Y < ih; Y++) for (u32 X = 0; X < iw; X++) if (big[Y * iw + X] != g_img[(Y / 2) * w + X / 2]) bad++;
             printf("%s load into a 2x image\n", bad ? (g_fail++, "FAIL") : "ok  ");
         }
+        // a texture copied out of the target, from a snapshot of its image: as store, the game's copy
+        // (240-wide tile rows into a 256-wide texture) and the texture decode, for each format that
+        // fits (1x; texels past the copied part are not compared)
+        for (u32 fmt = 0; fmt < 2; fmt++) {
+            u32 bpp = k_fb_bpp[fmt], size = 240 * 400 * bpp, row = 240 * 8 * bpp, gap = 16 * 8 * bpp;
+            randomize();
+            g_img_w = w;
+            for (u32 i = 0; i < w * h; i++) g_img[i] = rnd() ^ (rnd() << 16);
+            std::vector<u32> snap(g_img.begin(), g_img.begin() + w * h);
+            q[0] = {addr, w, h, fmt}; q[3] = {0, 0, 0, 0};
+            run(w * h / 4, k_store);
+            q[0] = {addr, 0x148200, size, 0}; q[1] = {row, 0, row, gap};
+            run(size / 4, k_copy);
+            u32 tw = 256, th = 512;
+            q[0] = {0x148200, tw, th, fmt}; q[3] = {0, 0, 0, 0};
+            g_img_w = tw;
+            run(tw * th, k_texdecode);
+            std::vector<u32> ref(g_img.begin(), g_img.begin() + tw * th);
+            std::copy(snap.begin(), snap.end(), g_img.begin());
+            g_img_w = w;
+            q[0] = {tw, th, fmt, 400}; q[3] = {w, h, 0, 0};
+            g_dst_w = tw;
+            run(tw * th, k_texup);
+            g_dst_w = 0;
+            int bad = 0;
+            for (u32 y = 0; y < 400; y++) for (u32 x = 0; x < 240; x++) if (g_dst[(th - 1 - y) * tw + x] != ref[(th - 1 - y) * tw + x]) bad++;
+            printf("%s texture from a target snapshot, format %u (%d differ)\n", bad ? (g_fail++, "FAIL") : "ok  ", fmt, bad);
+            q[3] = {0, 0, 0, 0};
+        }
         // the top screen at full size from the image: as the transfer to the framebuffer and the
         // screen output (1x), for both transfer flips
         for (u32 flip = 0; flip < 2; flip++) {

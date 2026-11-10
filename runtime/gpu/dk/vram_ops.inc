@@ -361,3 +361,27 @@ void k_screen(uint gid) {
     uint row = q[1].y != 0u ? H - 1u - y : y;
     OUTW(q[1].x + row * W + x, pack4(r, g, b, 255u));
 }
+
+// ---- A texture the game copied out of a scaled render target, at the scaler's size: q[0] = the
+// texture's native width tw and height th, the color format, the rows copied (from the top of the
+// target); the source is a snapshot of the target's image taken at the copy (q[3] its size, s times
+// 240 x rows). Each texel is what k_store, k_copy and k_texdecode would give for it at native size,
+// at s times the detail; texels past the copied part repeat its edge. One texel per invocation.
+uint px_decode_bits(uint e, uint fmt) {
+    if (fmt == 0u) return pack4(ch(e, 3u), ch(e, 2u), ch(e, 1u), ch(e, 0u));
+    if (fmt == 1u) return pack4(ch(e, 2u), ch(e, 1u), ch(e, 0u), 255u);
+    uint h = e & 0xFFFFu;
+    if (fmt == 2u) return pack4(((h >> 11u) & 31u) * 255u / 31u, ((h >> 6u) & 31u) * 255u / 31u, ((h >> 1u) & 31u) * 255u / 31u, (h & 1u) * 255u);
+    if (fmt == 3u) return pack4(((h >> 11u) & 31u) * 255u / 31u, ((h >> 5u) & 63u) * 255u / 63u, (h & 31u) * 255u / 31u, 255u);
+    return pack4((h >> 12u) * 17u, ((h >> 8u) & 15u) * 17u, ((h >> 4u) & 15u) * 17u, (h & 15u) * 17u);
+}
+void k_texup(uint gid) {
+    uint tw = q[0].x, th = q[0].y, fmt = q[0].z, rows = q[0].w;
+    uint sw = q[3].x, sh = q[3].y;   // the snapshot: s * 240 wide (or the target's width), s * rows tall
+    uint TW = udiv(tw * sh, rows), TH = udiv(th * sh, rows);   // the texture at the same scale
+    if (gid >= TW * TH) return;
+    uint Y = udiv(gid, TW), X = gid - Y * TW;
+    uint ym = TH - 1u - Y;                     // scaled memory row, from the top of the texture
+    uint x = X < sw ? X : sw - 1u, y = ym < sh ? ym : sh - 1u;
+    IMG_WRITE(X, Y, px_decode_bits(px_encode(IMG_READ(x, sh - 1u - y), fmt), fmt));
+}

@@ -69,4 +69,7 @@
   same 4 KB page where the left eye's render target begins, which is cleared every frame, so test
   18 showed the scaler's picture for only about 1 picture in 5 (the rest were the shrunk native
   framebuffer: blocky at 1.5x, merely smoothed at 2x). Track exact byte ranges for that.
+- A resolution scaler that only renders the eye targets larger shows nothing in this game: its
+  picture passes through GX texture copies (VRAM, native size) and full-screen redraws several
+  times per frame. The copies need large-size counterparts too.
 

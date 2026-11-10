@@ -709,7 +709,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 19 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 20 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -815,9 +815,9 @@ int main(int argc, char** argv) {
                 msr_receipt("  VRAM on the GPU: %u fills, %u copies (%u from images), %u transfers (%u from images), %u stores, %u loads, %u texture decodes",
                             vo[0], vo[1] + vo[8], vo[8], vo[2] + vo[7], vo[7], vo[3], vo[4], vo[5]);
                 {
-                    unsigned dkr_hires_count(void);
-                    msr_receipt("  3D screen resolution: %u pictures made at the larger size, %u shown from them, %u at native size",
-                                dkr_hires_count(), g_hires_shown, g_native_shown);
+                    unsigned dkr_hires_count(void), dkr_shadow_count(void);
+                    msr_receipt("  3D screen resolution: %u pictures made at the larger size, %u shown from them, %u at native size; %u textures read at the larger size",
+                                dkr_hires_count(), g_hires_shown, g_native_shown, dkr_shadow_count());
                     g_hires_shown = g_native_shown = 0;
                 }
                 static unsigned last_skip, last_total, last_realign;

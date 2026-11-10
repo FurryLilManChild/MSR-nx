@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 3): run 21 read, test 20 (scaled textures for the game's own passes)
+
+- Run 21 (test 19): the large pictures were now shown for nearly every picture (141 to 178 per 5 s,
+  0 native), yet Mark saw no sharper picture, and the output pictures (p052 at 2x, p059 at 1x) show
+  the same native-size detail. Probe frame plan of frame 1500: the eye's target is copied into a
+  texture (GX copy to 0x148200), drawn back into the right eye's target with the glow, copied
+  again (0x538A00), drawn into the left eye's target, copied again and drawn once more before the
+  transfer to the framebuffer. Each copy went through native-size VRAM, so the detail was lost at
+  the first one.
+- Test 20: a texture copy of a whole scaled target also snapshots its image; a texture read of
+  exactly that copy is made from the snapshot at the scaler's size (k_texup). vram_ops_test: at 1x
+  it equals store, the game's copy and the texture decode, formats 0 and 1.
+
 ## 2026-11-09 (late, 2): run 20 read, scaler fix built as test 19
 
 - Run 20 (test 18): Mark saw 1.5x blockier than 1x and 2x only smoother. The receipt: the large

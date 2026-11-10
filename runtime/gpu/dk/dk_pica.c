@@ -180,7 +180,7 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 #define VRAM_BASE 0x1F000000u
 #define VRAM_SIZE (6u << 20)
 #define VRAM_PAGES (VRAM_SIZE >> 12)
-enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_COUNT };
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_TEXUP, K_COUNT };
 static DkMemBlock g_vram;
 static DkGpuAddr g_vram_gpu;
 static DkShader g_k[K_COUNT];
@@ -192,9 +192,11 @@ static unsigned g_vram_ops[K_COUNT];
 static int in_vram(u32 a, u32 n) { return a >= VRAM_BASE && n <= VRAM_SIZE && a - VRAM_BASE <= VRAM_SIZE - n; }
 
 static void hires_written(u32 a, u32 n);
+static void shadow_written(u32 a, u32 n);
 static void vram_touch(u32 a, u32 n) {   // the GPU wrote [a, a + n) of VRAM
     if (!n) return;
     hires_written(a, n);
+    shadow_written(a, n);
     g_vram_tick++;
     for (u32 p = (a - VRAM_BASE) >> 12; p <= (a - VRAM_BASE + n - 1) >> 12 && p < VRAM_PAGES; p++) {
         g_vram_ver[p] = g_vram_tick;
@@ -495,6 +497,106 @@ static void sync_range(u32 a, u32 n) {
         }
 }
 
+// ---- textures copied out of scaled render targets ------------------------------------------------
+// The game builds each top-screen picture through several full-screen passes: it copies the eye's
+// render target into a texture (GX texture copy), draws that texture back into a render target with
+// the glow, copies again, and so on (probe frame plan, test 19). Without this the scaler's detail
+// would be lost at the first copy, the texture being the native-size copy in VRAM. So a copy of a
+// whole scaled target also snapshots its image, and a texture read from exactly that copy is made
+// from the snapshot at the scaler's size (k_texup) instead of from VRAM. Any other write to the
+// copy's bytes drops it.
+#define SHADOW_N 6
+#define SHADOW_SLOT (4u << 20)   // a 2x snapshot (480 x 800) and a 2x texture (512 x 1024) fit
+typedef struct {
+    u32 dst, span, tw, rows, fmt;
+    u32 sw, sh;                  // the snapshot's size
+    int valid, built;
+    u32 tex_h;                   // the texture height it was built for
+    DkImage snap, tex;
+} Shadow;
+static Shadow g_shadow[SHADOW_N];
+static DkMemBlock g_shadow_mem;
+static unsigned g_shadow_next, g_shadow_used;
+static void shadow_written(u32 a, u32 n) {
+    for (int k = 0; k < SHADOW_N; k++) {
+        Shadow* h = &g_shadow[k];
+        if (h->valid && a < h->dst + h->span && h->dst < a + n) h->valid = 0;
+    }
+}
+static int shadow_image(DkImage* img, u32 off, u32 w, u32 h, u32 room) {
+    DkImageLayoutMaker lm;
+    DkImageLayout lay;
+    dkImageLayoutMakerDefaults(&lm, g_dev);
+    lm.flags = DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine;
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = w;
+    lm.dimensions[1] = h;
+    dkImageLayoutInitialize(&lay, &lm);
+    if (dkImageLayoutGetSize(&lay) > room || (off & (dkImageLayoutGetAlignment(&lay) - 1))) return 0;
+    dkImageInitialize(img, &lay, g_shadow_mem, off);
+    return 1;
+}
+// A texture copy just done (its VRAM write recorded): input d[0], output d[1], size, input row
+// width and gap, output row width and gap (bytes), the output's span.
+static void shadow_capture(const u32* d, u32 size, u32 iw, u32 ig, u32 ow, u32 og, u32 out_span) {
+    if (g_scale == 2 || !g_shadow_mem) return;
+    Surf* src = 0;
+    for (int k = 0; k < MAX_SURF; k++) {
+        Surf* t = &g_surf[k];
+        if (t->used && !t->depth && t->scaled && t->addr == d[0]) { src = t; break; }
+    }
+    if (!src || src->cpu_dirty || src->clear_pending) return;
+    u32 bpp = k_bpp[src->fmt];
+    if (ig || iw != src->w * bpp * 8 || ow != iw || size != src->w * src->h * bpp || (ow + og) % (8 * bpp)) return;
+    int slot = -1;
+    for (int k = 0; k < SHADOW_N; k++) if (g_shadow[k].dst == d[1]) slot = k;
+    if (slot < 0) slot = (int)(g_shadow_next++ % SHADOW_N);
+    Shadow* h = &g_shadow[slot];
+    h->valid = 0;
+    if (h->sw != src->sw || h->sh != src->sh || h->dst != d[1]) {
+        if (!shadow_image(&h->snap, slot * SHADOW_SLOT, src->sw, src->sh, SHADOW_SLOT / 2)) return;
+        h->sw = src->sw; h->sh = src->sh;
+        h->tex_h = 0;
+    }
+    ts_mark(TS_VRAM);
+    gpu_barrier();   // the target's draws first
+    DkImageView sv, dv;
+    dkImageViewDefaults(&sv, &src->img);
+    dkImageViewDefaults(&dv, &h->snap);
+    DkImageRect r = {0, 0, 0, src->sw, src->sh, 1};
+    dkCmdBufCopyImage(g_cmd, &sv, &r, &dv, &r, 0);
+    GPU_WORK();
+    gpu_barrier();
+    h->dst = d[1]; h->span = out_span; h->tw = (ow + og) / (8 * bpp); h->rows = src->h; h->fmt = src->fmt;
+    h->built = 0;
+    h->valid = 1;
+}
+// tex_get: the texture at the scaler's size, if [v, ...) is a current copy of a scaled target read
+// whole, in the target's own format (PICA texture formats 0 to 4 are the color formats).
+static DkImage* shadow_texture(u32 v, u32 fmt, u32 w, u32 h) {
+    if (g_scale == 2) return 0;
+    for (int k = 0; k < SHADOW_N; k++) {
+        Shadow* s = &g_shadow[k];
+        if (!s->valid || s->dst != v || s->tw != w || s->fmt != fmt || h < s->rows) continue;
+        u32 TW = w * s->sh / s->rows, TH = h * s->sh / s->rows;
+        if (!s->built || s->tex_h != h) {
+            if (s->tex_h != h) {
+                if (!shadow_image(&s->tex, k * SHADOW_SLOT + SHADOW_SLOT / 2, TW, TH, SHADOW_SLOT / 2)) { s->valid = 0; return 0; }
+                s->tex_h = h;
+            }
+            u32 q[16] = {w, h, fmt, s->rows};
+            q[12] = s->sw; q[13] = s->sh;
+            g_bound_color = g_bound_depth = 0;
+            kernel(K_TEXUP, q, TW * TH, &s->snap, &s->tex);
+            s->built = 1;
+        }
+        g_shadow_used++;
+        return &s->tex;
+    }
+    return 0;
+}
+unsigned dkr_shadow_count(void) { unsigned n = g_shadow_used; g_shadow_used = 0; return n; }
+
 // ---- textures --------------------------------------------------------------------------------------
 
 typedef struct {
@@ -626,6 +728,10 @@ static DkImage* tex_get(u32 paddr, u32 fmt, u32 w, u32 h) {
         Tex* t = &g_tex[k];
         if (t->used && t->addr == v && t->w == w && t->h == h && t->fmt == fmt) { hit = t; break; }
         if (!t->used && !free_t) free_t = t;
+    }
+    if (vr) {
+        DkImage* sht = shadow_texture(v, fmt, w, h);
+        if (sht) return sht;
     }
     if (vr) {   // decoded on the GPU from its VRAM whenever those pages changed
         u32 ver = vram_version(v, size);
@@ -1254,6 +1360,7 @@ static int dk_gx(int op, const u32* d) {
                          is->scaled ? is->sw : 0, is->scaled ? is->sh : 0};
             kernel(K_COPY_IMG, q, size / 4, &is->img, 0);
             vram_touch(d[1], out_span);
+            shadow_capture(d, size, iw, ig, ow, og, out_span);
             MSR_PERF_END(PERF_TEXCOPY);
             return 1;
         }
@@ -1262,6 +1369,7 @@ static int dk_gx(int op, const u32* d) {
         u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og};
         kernel(K_COPY, q, size / 4, 0, 0);
         vram_touch(d[1], out_span);
+        shadow_capture(d, size, iw, ig, ow, og, out_span);
         MSR_PERF_END(PERF_TEXCOPY);
         return 1;
     }
@@ -1745,10 +1853,10 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     DkMemBlockMaker mm;
     static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
                                              vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh,
-                                             vram_hires_dksh};
+                                             vram_hires_dksh, vram_texup_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
-                                       vram_copy_img_dksh_size, vram_hires_dksh_size};
+                                       vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size};
     u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
     u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
@@ -1793,6 +1901,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     dkMemBlockMakerDefaults(&mm, dev, 8u << 20);   // the scaler's top screen pictures: 4 at 800 x 480 at most
     mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
     g_hires_mem = dkMemBlockCreate(&mm);
+    dkMemBlockMakerDefaults(&mm, dev, SHADOW_N * SHADOW_SLOT);   // textures copied out of scaled targets
+    mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+    g_shadow_mem = dkMemBlockCreate(&mm);
 
     dkMemBlockMakerDefaults(&mm, dev, CMD_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
