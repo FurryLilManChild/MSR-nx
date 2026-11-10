@@ -26,7 +26,9 @@ static UV4 q[4];
 #define LDW(i) g_vram[(i)]
 #define STW(i, v) (g_vram[(i)] = (v))
 #define IMG_READ(x, y) g_img[(y) * g_img_w + (x)]
-#define IMG_WRITE(x, y, v) (g_img[(y) * g_img_w + (x)] = (v))
+static std::vector<u32> g_dst(800 * 480);
+static u32 g_dst_w = 0;   // 0: IMG_WRITE goes to g_img (k_load, k_texdecode); else to g_dst (k_hires)
+#define IMG_WRITE(x, y, v) (g_dst_w ? (g_dst[(y) * g_dst_w + (x)] = (v)) : (g_img[(y) * g_img_w + (x)] = (v)))
 #define OUTW(i, v) (g_out[(i)] = (v))
 typedef uint32_t uint;
 #include "vram_ops.inc"
@@ -393,6 +395,74 @@ int main() {
         q[0] = {addr, w, h, fmt};
         run(w * h, k_texdecode);
         printf("%s texture format %u\n", memcmp(ref.data(), g_img.data(), w * h * 4) ? (g_fail++, "FAIL") : "ok  ", fmt);
+    }
+    // the resolution scaler: a target image s times the native size
+    {
+        // store from a 2x and a 1.5x image: as storing the native image the kernel sees (2 x 2
+        // average, nearest)
+        u32 w = 240, h = 400, addr = 0x08CA00;
+        for (int sc = 0; sc < 2; sc++) {
+            u32 iw = sc ? 360 : 480, ih = sc ? 600 : 800;
+            randomize();
+            g_img_w = iw;
+            for (u32 i = 0; i < iw * ih; i++) g_img[i] = rnd() ^ (rnd() << 16);
+            std::vector<u32> nat(w * h);
+            for (u32 y = 0; y < h; y++)
+                for (u32 x = 0; x < w; x++) {
+                    if (!sc) {
+                        u32 a = g_img[2 * y * iw + 2 * x], b = g_img[2 * y * iw + 2 * x + 1], c = g_img[(2 * y + 1) * iw + 2 * x], d = g_img[(2 * y + 1) * iw + 2 * x + 1], r = 0;
+                        for (int k = 0; k < 4; k++) r |= ((((a >> 8 * k) & 255) + ((b >> 8 * k) & 255) + ((c >> 8 * k) & 255) + ((d >> 8 * k) & 255) + 2) >> 2) << 8 * k;
+                        nat[y * w + x] = r;
+                    } else nat[y * w + x] = g_img[((2 * y + 1) * ih / (2 * h)) * iw + (2 * x + 1) * iw / (2 * w)];
+                }
+            auto before = snapshot();
+            q[0] = {addr, w, h, 0}; q[3] = {iw, ih, 0, 0};
+            run(w * h / 4, k_store);
+            auto got = snapshot();
+            memcpy(M(), before.data(), VRAM_BYTES);
+            std::vector<u32> keep(g_img.begin(), g_img.begin() + iw * ih);
+            g_img_w = w;
+            std::copy(nat.begin(), nat.end(), g_img.begin());
+            q[3] = {0, 0, 0, 0};
+            run(w * h / 4, k_store);
+            check(sc ? "store from a 1.5x image" : "store from a 2x image", got);
+            std::copy(keep.begin(), keep.end(), g_img.begin());
+        }
+        // load into a 2x image: each image pixel from the native pixel under it
+        {
+            u32 iw = 480, ih = 800;
+            randomize();
+            q[0] = {addr, w, h, 0}; q[3] = {iw, ih, 0, 0};
+            g_img_w = iw;
+            run(iw * ih, k_load);
+            std::vector<u32> big(g_img.begin(), g_img.begin() + iw * ih);
+            q[3] = {0, 0, 0, 0}; g_img_w = w;
+            run(w * h, k_load);
+            int bad = 0;
+            for (u32 Y = 0; Y < ih; Y++) for (u32 X = 0; X < iw; X++) if (big[Y * iw + X] != g_img[(Y / 2) * w + X / 2]) bad++;
+            printf("%s load into a 2x image\n", bad ? (g_fail++, "FAIL") : "ok  ");
+        }
+        // the top screen at full size from the image: as the transfer to the framebuffer and the
+        // screen output (1x), for both transfer flips
+        for (u32 flip = 0; flip < 2; flip++) {
+            randomize();
+            g_img_w = w;
+            for (u32 i = 0; i < w * h; i++) g_img[i] = rnd() ^ (rnd() << 16);
+            q[0] = {addr, w, h, 0}; q[3] = {0, 0, 0, 0};
+            run(w * h / 4, k_store);
+            q[0] = {addr, 0x046500, 0x019000F0, 0x019000F0}; q[1] = {0x00001000 | flip, 0, 0, 0};
+            run(240 * 400 / 4, k_transfer);
+            q[0] = {0x046500, 240 * 3, 1, 400}; q[1] = {0, 1, 0, 0};
+            run(400 * 240, k_screen);
+            q[0] = {flip, 0, 0, 0}; q[3] = {w, h, 0, 0};
+            g_dst_w = 400;
+            run(400 * 240, k_hires);
+            g_dst_w = 0;
+            int bad = 0;
+            for (u32 i = 0; i < 400 * 240; i++) if (g_dst[i] != g_out[i]) bad++;
+            printf("%s top screen from the image, flip %u (%d differ)\n", bad ? (g_fail++, "FAIL") : "ok  ", flip, bad);
+            q[3] = {0, 0, 0, 0};
+        }
     }
     // screen output
     for (u32 fmt = 0; fmt < 5; fmt++)

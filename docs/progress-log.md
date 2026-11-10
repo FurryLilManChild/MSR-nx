@@ -1,5 +1,23 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late): run 19 read, test 18 (resolution scaler)
+
+- Run 19 (test 17): the beam switches (slot 0 to 1 and back, four times) and eight pause-view
+  switches all logged as meant; Mark confirmed the fixes work. 2 new fragment shaders.
+- Test 18, the resolution scaler, port menu "3D screen resolution": 1x, 1.5x, 2x. The top screen's
+  3D render targets (240 x 400 in VRAM) and their depth buffers get images that size times the
+  scale; viewport and scissor scale with them. Stores, transfers and copies from them shrink the
+  image back (2 x 2 average at 2x, nearest at 1.5x) so everything the game reads stays native.
+  A display transfer of a whole scaled target into a 240 x 400 framebuffer also makes a
+  screen-sized picture from the large image (k_hires), and main_nx.c shows that instead of the
+  framebuffer while the framebuffer's VRAM is unchanged since. The receipt counts pictures shown
+  each way.
+- Checked on the PC (vram_ops_test): stores from 2x and 1.5x images equal storing their average or
+  nearest native image; a load into a 2x image repeats each native pixel; k_hires at 1x equals the
+  transfer to the framebuffer plus the screen output, both flips. The draws at the larger size run
+  only on the Switch.
+- Pack: 163 fragment configurations, 193 shaders.
+
 ## 2026-11-09 (night): run 17 and 18 read, test 17 (single screen follows the pause menu, beams)
 
 - Run 17 (test 16, docked 768 MHz): VRAM work about 600 to 430 ms per 5 s, stores about 1200 to

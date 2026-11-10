@@ -88,8 +88,19 @@ typedef struct {
     int cpu_dirty;           // guest memory changed; the image is older
     int clear_pending;
     u32 clear_value;
+    int scaled;              // the resolution scaler's size: the image is sw x sh, not w x h
+    u32 sw, sh;
     DkImage img;
 } Surf;
+
+// The resolution scaler (port menu): the top screen's 3D render targets (240 x 400, in VRAM) and
+// their depth buffers are drawn at g_scale / 2 times their size. Everything that reads them back to
+// the 3DS's VRAM shrinks them again (vram_ops.inc img_read_s); the top screen itself is shown from
+// the large image (k_hires). 2 is 1x, 3 is 1.5x, 4 is 2x.
+static int g_scale = 2;
+static volatile int g_scale_req = 2;
+void dkr_set_scale(int halves) { if (halves >= 2 && halves <= 4) g_scale_req = halves; }
+static int scale_fits(u32 w, u32 h) { return g_scale != 2 && w == 240 && h == 400; }
 
 #define MAX_SURF 32
 static Surf g_surf[MAX_SURF];
@@ -169,7 +180,7 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 #define VRAM_BASE 0x1F000000u
 #define VRAM_SIZE (6u << 20)
 #define VRAM_PAGES (VRAM_SIZE >> 12)
-enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_COUNT };
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_COUNT };
 static DkMemBlock g_vram;
 static DkGpuAddr g_vram_gpu;
 static DkShader g_k[K_COUNT];
@@ -283,23 +294,26 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Compute, 0, &ub, 1);
     DkBufExtents sb[2] = {{g_vram_gpu, VRAM_SIZE}, {g_vram_gpu, VRAM_SIZE}};
     dkCmdBufBindStorageBuffers(g_cmd, DkStage_Compute, 0, sb, 2);
-    if (src || dst) {
-        u32 doff = dyn_alloc(sizeof(DkImageDescriptor) + sizeof(DkSamplerDescriptor), 64);
+    if (src || dst) {   // image descriptor 0 the source (a texture), 1 the destination (an image)
+        u32 doff = dyn_alloc(2 * sizeof(DkImageDescriptor) + sizeof(DkSamplerDescriptor), 64);
         DkImageDescriptor* id = (DkImageDescriptor*)(g_dyn_cpu + doff);
-        DkSamplerDescriptor* sd = (DkSamplerDescriptor*)(g_dyn_cpu + doff + sizeof(DkImageDescriptor));
+        DkSamplerDescriptor* sd = (DkSamplerDescriptor*)(g_dyn_cpu + doff + 2 * sizeof(DkImageDescriptor));
         DkImageView iv;
         dkImageViewDefaults(&iv, src ? src : dst);
-        dkImageDescriptorInitialize(id, &iv, false, false);
+        dkImageDescriptorInitialize(&id[0], &iv, false, false);
+        dkImageViewDefaults(&iv, dst ? dst : src);
+        dkImageDescriptorInitialize(&id[1], &iv, false, false);
         DkSampler smp;
         dkSamplerDefaults(&smp);
         dkSamplerDescriptorInitialize(sd, &smp);
-        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 1);
-        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + sizeof(DkImageDescriptor), 1);
+        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 2);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 2 * sizeof(DkImageDescriptor), 1);
         if (src) {
             DkResHandle th = dkMakeTextureHandle(0, 0);
             dkCmdBufBindTextures(g_cmd, DkStage_Compute, 0, &th, 1);
-        } else {
-            DkResHandle ih = dkMakeImageHandle(0);
+        }
+        if (dst) {
+            DkResHandle ih = dkMakeImageHandle(1);
             dkCmdBufBindImages(g_cmd, DkStage_Compute, 0, &ih, 1);
         }
     }
@@ -405,8 +419,11 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     dkImageLayoutMakerDefaults(&lm, g_dev);
     lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine | (depth ? 0 : DkImageFlags_UsageLoadStore);
     lm.format = depth ? DkImageFormat_Z24S8 : DkImageFormat_RGBA8_Unorm;
-    lm.dimensions[0] = w;
-    lm.dimensions[1] = h;
+    u32 bytes = depth ? w * h * (fmt == 0 ? 2 : fmt == 3 ? 4 : 3) : w * h * k_bpp[fmt];
+    int scaled = scale_fits(w, h) && (depth || in_vram(addr, bytes));
+    u32 sw = scaled ? w * g_scale / 2 : w, sh = scaled ? h * g_scale / 2 : h;
+    lm.dimensions[0] = sw;
+    lm.dimensions[1] = sh;
     dkImageLayoutInitialize(&lay, &lm);
     u32 off = img_alloc(&lay);
     if (off == ~0u) { surf_reset_all(); s = &g_surf[0]; off = img_alloc(&lay); }
@@ -415,7 +432,8 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     dkImageInitialize(&s->img, &lay, g_img, off);
     s->used = 1;
     s->addr = addr; s->w = w; s->h = h; s->fmt = fmt; s->depth = depth;
-    s->bytes = depth ? w * h * (fmt == 0 ? 2 : fmt == 3 ? 4 : 3) : w * h * k_bpp[fmt];
+    s->bytes = bytes;
+    s->scaled = scaled; s->sw = sw; s->sh = sh;
     s->cpu_dirty = 1;
     if (depth) { s->clear_pending = 1; s->clear_value = 0x00FFFFFFu; }
     msr_log("gpu: new %s surface %08X %ux%u format %u", depth ? "depth" : "color", addr, w, h, fmt);
@@ -427,14 +445,16 @@ static int overlaps(Surf* s, u32 a, u32 n) { return s->used && a < s->addr + s->
 // A render target in VRAM: image -> the GPU's VRAM, and back.
 static void surf_store(Surf* s) {
     u32 q[16] = {s->addr - VRAM_BASE, s->w, s->h, s->fmt};
+    if (s->scaled) { q[12] = s->sw; q[13] = s->sh; }
     kernel(K_STORE, q, s->w * s->h / 4, &s->img, 0);
     vram_touch(s->addr, s->bytes);
     s->gpu_dirty = 0;
 }
 static void surf_load(Surf* s) {
     u32 q[16] = {s->addr - VRAM_BASE, s->w, s->h, s->fmt};
+    if (s->scaled) { q[12] = s->sw; q[13] = s->sh; }
     g_bound_color = g_bound_depth = 0;   // the image is written outside the render pass
-    kernel(K_LOAD, q, s->w * s->h, 0, &s->img);
+    kernel(K_LOAD, q, s->sw * s->sh, 0, &s->img);
     s->cpu_dirty = 0;
 }
 
@@ -780,6 +800,11 @@ static int dk_draw(int indexed) {
     u32 W = r[0x11E] & 0x7FF, H = ((r[0x11E] >> 12) & 0x3FF) + 1;
     u32 cva = pica_vaddr(r[0x11D] << 3), dva = r[0x11C] ? pica_vaddr(r[0x11C] << 3) : 0;
     if (!cva || !W || !H) return 1;
+    if (g_scale_req != g_scale) {   // the scaler changed: every render target starts over at the new size
+        surf_reset_all();
+        g_scale = g_scale_req;
+        msr_receipt("gpu: 3D screen drawn at %d.%dx", g_scale / 2, g_scale & 1 ? 5 : 0);
+    }
 
     // ---- phase A: everything that may flush (surface and texture uploads, readbacks)
     Surf* cs = 0, *ds = 0;
@@ -789,6 +814,7 @@ static int dk_draw(int indexed) {
         cs = surf_get(cva, W, H, (r[0x117] >> 16) & 7, 0);
         ds = dva ? surf_get(dva, W, H, r[0x116] & 3, 1) : 0;
         if (!cs) return 1;
+        if (ds && ds->scaled != cs->scaled) ds = 0;   // sizes must match (a depth buffer outside VRAM with a scaled target)
         if (cs->cpu_dirty) surf_upload(cs);
         if (ds && ds->cpu_dirty) surf_upload(ds);
         for (int u = 0; u < 3; u++) {
@@ -883,7 +909,7 @@ static int dk_draw(int indexed) {
         g_bound_depth = ds;
     }
     if (cs->clear_pending || (ds && ds->clear_pending)) {
-        DkScissor full = {0, 0, W, H};
+        DkScissor full = {0, 0, cs->sw, cs->sh};
         dkCmdBufSetScissors(g_cmd, 0, &full, 1);
         DkColorWriteState all;
         dkColorWriteStateDefaults(&all);
@@ -995,11 +1021,20 @@ static int dk_draw(int indexed) {
         vp.near = offset;
         vp.far = offset - scale;
     }
+    if (cs->scaled) {   // the scaler: the same picture on the larger image
+        float f = cs->sw / (float)W;
+        vp.x *= f; vp.y *= f; vp.width *= f; vp.height *= f;
+    }
     dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
-    DkScissor sc = {0, 0, W, H};
+    DkScissor sc = {0, 0, cs->sw, cs->sh};
     if (r[0x65] & 3) {
         u32 x0 = r[0x66] & 0x3FF, y0 = (r[0x66] >> 16) & 0x3FF, x1 = r[0x67] & 0x3FF, y1 = (r[0x67] >> 16) & 0x3FF;
         sc = (DkScissor){x0, y0, x1 >= x0 ? x1 - x0 + 1 : 0, y1 >= y0 ? y1 - y0 + 1 : 0};
+        if (cs->scaled) {   // pixel edges at the larger size (1.5x: the start rounds down, the end up)
+            u32 e0x = sc.x + sc.width, e0y = sc.y + sc.height;
+            sc.x = sc.x * cs->sw / W; sc.y = sc.y * cs->sh / H;
+            sc.width = (e0x * cs->sw + W - 1) / W - sc.x; sc.height = (e0y * cs->sh + H - 1) / H - sc.y;
+        }
     }
     dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
     dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
@@ -1076,6 +1111,69 @@ static Surf* img_source(u32 a, u32 n) {
     return src;
 }
 
+// ---- the top screen at the scaler's size ----------------------------------------------------------
+// A display transfer of a whole scaled 3D render target into a 240 x 400 framebuffer (the game's
+// last step of each eye's picture) also makes the screen-sized picture from the large image, kept
+// per framebuffer address. main_nx.c shows it in place of the framebuffer while that framebuffer's
+// VRAM is still what the transfer wrote (its version), and falls back to the framebuffer otherwise.
+#define HIRES_N 4
+static DkMemBlock g_hires_mem;
+static DkImage g_hires_img[HIRES_N];
+static int g_hires_scale;                       // the size the images were set up for
+static volatile u32 g_hires_addr[HIRES_N], g_hires_ver[HIRES_N];
+static u32 g_hires_next;
+static unsigned g_hires_made;
+static void hires_setup(void) {
+    if (g_hires_scale == g_scale) return;
+    g_hires_scale = g_scale;
+    for (int k = 0; k < HIRES_N; k++) g_hires_addr[k] = 0;
+    if (g_scale == 2) return;
+    DkImageLayoutMaker lm;
+    DkImageLayout lay;
+    dkImageLayoutMakerDefaults(&lm, g_dev);
+    lm.flags = DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine;
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = 400 * g_scale / 2;
+    lm.dimensions[1] = 240 * g_scale / 2;
+    dkImageLayoutInitialize(&lay, &lm);
+    u32 a = dkImageLayoutGetAlignment(&lay), size = ((u32)dkImageLayoutGetSize(&lay) + a - 1) & ~(a - 1);
+    for (int k = 0; k < HIRES_N; k++) dkImageInitialize(&g_hires_img[k], &lay, g_hires_mem, k * size);
+}
+static void hires_capture(const u32* d, u32 outb) {
+    // a whole 240 x 400 picture, not shrunk, tiled in and linear out (flags bits 1 and 5 clear)
+    if (g_scale == 2 || ((d[4] >> 24) & 3) || (d[4] & 0x22) || d[2] != 0x019000F0 || d[3] != 0x019000F0) return;
+    Surf* src = 0;
+    for (int k = 0; k < MAX_SURF; k++) {
+        Surf* s = &g_surf[k];
+        if (s->used && !s->depth && s->scaled && s->addr == d[0] && s->w == 240 && s->h == 400) { src = s; break; }
+    }
+    if (!src || src->cpu_dirty || src->clear_pending) return;
+    hires_setup();
+    int slot = -1;
+    for (int k = 0; k < HIRES_N; k++) if (g_hires_addr[k] == d[1]) slot = k;
+    if (slot < 0) slot = (int)(g_hires_next++ % HIRES_N);
+    g_hires_addr[slot] = 0;   // not valid while it is redone
+    u32 q[16] = {d[4] & 1};
+    q[12] = src->sw; q[13] = src->sh;
+    kernel(K_HIRES, q, src->sw * src->sh, &src->img, &g_hires_img[slot]);
+    g_hires_ver[slot] = vram_version(d[1], outb);
+    g_hires_addr[slot] = d[1];
+    g_hires_made++;
+}
+// main_nx.c: the large picture for the top screen's framebuffer at addr, if there is a current one.
+int dkr_hires_top(u32 addr, DkImage** img, u32* w, u32* h) {
+    if (g_hires_scale == 2 || g_scale != g_hires_scale) return 0;
+    for (int k = 0; k < HIRES_N; k++)
+        if (g_hires_addr[k] == addr && in_vram(addr, 240 * 400 * 3) && g_hires_ver[k] == vram_version(addr, 240 * 400 * 3)) {
+            *img = &g_hires_img[k];
+            *w = 400 * g_hires_scale / 2;
+            *h = 240 * g_hires_scale / 2;
+            return 1;
+        }
+    return 0;
+}
+unsigned dkr_hires_count(void) { unsigned n = g_hires_made; g_hires_made = 0; return n; }
+
 // GX commands on VRAM, done on the GPU (pica_gx_hook): see hle_hid_gsp.c for the command words.
 static const u32 k_fb_bytes[8] = {4, 3, 2, 2, 2, 4, 4, 4};
 static int dk_gx(int op, const u32* d) {
@@ -1114,8 +1212,10 @@ static int dk_gx(int op, const u32* d) {
         if (is && is->addr == d[0] && is->w == iw && is->h == ih && is->fmt == fi) {
             vram_will_write(d[1], outb);
             u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, d[2], d[3], d[4]};
+            if (is->scaled) { q[12] = is->sw; q[13] = is->sh; }
             kernel(K_TRANSFER_IMG, q, ow * oh / 4, &is->img, 0);
             vram_touch(d[1], outb);
+            hires_capture(d, outb);
             MSR_PERF_END(PERF_TRANSFER);
             return 1;
         }
@@ -1124,6 +1224,7 @@ static int dk_gx(int op, const u32* d) {
         u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, d[2], d[3], d[4]};
         kernel(K_TRANSFER, q, ow * oh / 4, 0, 0);
         vram_touch(d[1], outb);
+        hires_capture(d, outb);
         MSR_PERF_END(PERF_TRANSFER);
         return 1;
     }
@@ -1137,7 +1238,8 @@ static int dk_gx(int op, const u32* d) {
         Surf* is = img_source(d[0], in_span);
         if (is) {
             vram_will_write(d[1], out_span);
-            u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og, is->addr - VRAM_BASE, is->w, is->h, is->fmt};
+            u32 q[16] = {d[0] - VRAM_BASE, d[1] - VRAM_BASE, size, 0, iw, ig, ow, og, is->addr - VRAM_BASE, is->w, is->h, is->fmt,
+                         is->scaled ? is->sw : 0, is->scaled ? is->sh : 0};
             kernel(K_COPY_IMG, q, size / 4, &is->img, 0);
             vram_touch(d[1], out_span);
             MSR_PERF_END(PERF_TEXCOPY);
@@ -1630,10 +1732,11 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     g_qlock = qlock;
     DkMemBlockMaker mm;
     static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
-                                             vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh};
+                                             vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh,
+                                             vram_hires_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
-                                       vram_copy_img_dksh_size};
+                                       vram_copy_img_dksh_size, vram_hires_dksh_size};
     u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
     u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
@@ -1675,6 +1778,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     dkMemBlockMakerDefaults(&mm, dev, IMG_SIZE);
     mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
     g_img = dkMemBlockCreate(&mm);
+    dkMemBlockMakerDefaults(&mm, dev, 8u << 20);   // the scaler's top screen pictures: 4 at 800 x 480 at most
+    mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+    g_hires_mem = dkMemBlockCreate(&mm);
 
     dkMemBlockMakerDefaults(&mm, dev, CMD_SIZE);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;

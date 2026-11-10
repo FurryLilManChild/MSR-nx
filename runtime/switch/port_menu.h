@@ -16,6 +16,7 @@ typedef struct {
     int gpu;           // GPU clock choice (port_menu.c k_gpu_hz), 0 the system's own
     int show_fps;      // the frame counter
     int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
+    int scale;         // resolution scaler for the 3D top screen: 0 1x, 1 1.5x, 2 2x (dk_pica.c g_scale)
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam
 } PortSettings;
@@ -31,7 +32,7 @@ void port_menu_init(const char* settings_path);
 u32 port_menu_input(u64 held);
 // The menu panel, PANEL_W x PANEL_H RGBA, when it changed since the last call (else 0).
 #define PANEL_W 800
-#define PANEL_H 560
+#define PANEL_H 590
 const u32* port_menu_panel(void);
 // Where the screens go on the 1280x720 output for the current layout (w or h 0: not shown).
 typedef struct { int x, y, w, h; } Rect;

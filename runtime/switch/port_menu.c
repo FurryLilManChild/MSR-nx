@@ -10,6 +10,7 @@
 
 void dkr_set_sync_mode(int m);   // gpu/dk/dk_pica.c
 void dkr_set_img_path(int on);    // gpu/dk/dk_pica.c
+void dkr_set_scale(int halves);   // gpu/dk/dk_pica.c
 
 PortSettings g_set;
 int g_menu_open;
@@ -43,7 +44,7 @@ static const char* sw_name(u64 b) {
     return "(none)";
 }
 
-enum { ROW_LAYOUT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
+enum { ROW_LAYOUT, ROW_SCALE, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 
 // ---- clocks -----------------------------------------------------------------------------------------
 // The clocks the system had when the port first changed one, put back when the port exits.
@@ -98,7 +99,7 @@ static void save(void) {
     // written in place: the SD card cannot rename over an existing file (learned on MPH-nx)
     FILE* f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies);
+    fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\nscale=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies, g_set.scale);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -121,6 +122,7 @@ void port_menu_init(const char* settings_path) {
             else if (sscanf(line, "gpu=%d", &v) == 1 && v >= 0 && v < GPU_COUNT) g_set.gpu = v;
             else if (sscanf(line, "sync=%d", &v) == 1 && v >= 0 && v < 3) g_set.sync = v;
             else if (sscanf(line, "copies=%d", &v) == 1) g_set.copies = v != 0;
+            else if (sscanf(line, "scale=%d", &v) == 1 && v >= 0 && v < 3) g_set.scale = v;
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
         fclose(f);
@@ -128,6 +130,7 @@ void port_menu_init(const char* settings_path) {
     }
     dkr_set_sync_mode(g_set.sync);
     dkr_set_img_path(!g_set.copies);
+    dkr_set_scale(2 + g_set.scale);
     msr_receipt("menu: settings %s: layout %s, CPU clock %s", found ? "loaded" : "default", k_layout_names[g_set.layout],
                 k_clock_names[g_set.clock]);
     if (g_set.clock != CLOCK_STOCK) clock_apply();
@@ -176,6 +179,7 @@ static void draw(void) {
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
         else if (r == ROW_GPU) { label = "GPU clock"; snprintf(v, sizeof v, "< %s >", k_gpu_names[g_set.gpu]); }
         else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync (test)"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
+        else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
         else if (r == ROW_COPIES) { label = "Copies (test)"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r < ROW_RESET) {
@@ -236,6 +240,12 @@ u32 port_menu_input(u64 held) {
             g_set.copies = !g_set.copies;
             dkr_set_img_path(!g_set.copies);
             msr_receipt("menu: copies %s", g_set.copies ? "through VRAM" : "from images");
+            g_dirty = 1;
+        }
+        if (dx && g_row == ROW_SCALE) {
+            g_set.scale = (g_set.scale + 3 + dx) % 3;
+            dkr_set_scale(2 + g_set.scale);
+            msr_receipt("menu: 3D screen resolution %s", g_set.scale == 0 ? "1x" : g_set.scale == 1 ? "1.5x" : "2x");
             g_dirty = 1;
         }
         if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }

@@ -294,6 +294,7 @@ static void convert_screen(int screen, u32* out, int flip) {
 void dkr_frame_end(void);
 static int g_gpu_render;
 static int g_shot_request, g_shots_left = 6;   // pictures of both screens when the pause view first comes up
+static unsigned g_hires_shown, g_native_shown;   // top-screen pictures shown from the scaler's picture, and not
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
     // only convert the screens when the game showed a new picture on one of them; the menu (open,
@@ -360,7 +361,21 @@ static void present(void) {
     // (the output image is shown upside down under OriginLowerLeft: its row 0 is the bottom of the TV)
     DkImageRect ts = {0, 0, 0, 400, 240, 1}, td = {(u32)tr.x, (u32)(FB_H - tr.y - tr.h), 0, (u32)tr.w, (u32)tr.h, 1};
     DkImageRect bs = {0, 0, 0, 320, 240, 1}, bd = {(u32)br.x, (u32)(FB_H - br.y - br.h), 0, (u32)br.w, (u32)br.h, 1};
-    if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
+    // the resolution scaler: the top screen from the large picture made from the game's render
+    // target (dk_pica.c k_hires), while its framebuffer still holds what that picture was made for
+    DkImage* hi = 0;
+    u32 hw = 0, hh = 0;
+    if (tr.w && g_gpu_render) {
+        int dkr_hires_top(u32 addr, DkImage** img, u32* w, u32* h);
+        if (dkr_hires_top(msr_fb[0].left, &hi, &hw, &hh)) g_hires_shown++; else g_native_shown++;
+    }
+    if (tr.w && hi) {
+        DkImageView hv;
+        dkImageViewDefaults(&hv, hi);
+        DkImageRect hs = {0, 0, 0, hw, hh, 1};
+        dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the renderer's kernel wrote it
+        dkCmdBufBlitImage(g_cmd, &hv, &hs, &fbv, &td, DkBlitFlag_FilterLinear, 0);
+    } else if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
     if (g_set.layout == LAYOUT_TOP_ONLY && !g_map_view && !g_auto_bottom && hud_on_bottom()) {
         // single-screen mode: the bottom screen's readouts, cut out of it and drawn at 2x on the top
@@ -643,7 +658,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 17 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 18 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -748,6 +763,12 @@ int main(int argc, char** argv) {
                 dkr_vram_stats(vo);
                 msr_receipt("  VRAM on the GPU: %u fills, %u copies (%u from images), %u transfers (%u from images), %u stores, %u loads, %u texture decodes",
                             vo[0], vo[1] + vo[8], vo[8], vo[2] + vo[7], vo[7], vo[3], vo[4], vo[5]);
+                {
+                    unsigned dkr_hires_count(void);
+                    msr_receipt("  3D screen resolution: %u pictures made at the larger size, %u shown from them, %u at native size",
+                                dkr_hires_count(), g_hires_shown, g_native_shown);
+                    g_hires_shown = g_native_shown = 0;
+                }
                 static unsigned last_skip, last_total, last_realign;
                 extern unsigned fp_realigned;
                 msr_receipt("  frame plan: %u of %u GPU operations skipped (right eye and other unseen work), %u realigned",

@@ -105,6 +105,22 @@ void group_store(uint word, uint nwords) {
     if (nwords > 3u) STW(word + 3u, g_w3);
 }
 
+// A pixel of the bound render target image at native position (x, y) of a w x h target. The
+// image can be larger (resolution scaler): q[3].x, q[3].y = its size (0: the same). Twice the size
+// averages the 2 x 2 pixels; other sizes take the nearest one.
+uint img_read_s(uint x, uint y, uint w, uint h) {
+    uint iw = q[3].x, ih = q[3].y;
+    if (iw == 0u || (iw == w && ih == h)) return IMG_READ(x, y);
+    if (iw == 2u * w && ih == 2u * h) {
+        uint a = IMG_READ(2u * x, 2u * y), b = IMG_READ(2u * x + 1u, 2u * y);
+        uint c = IMG_READ(2u * x, 2u * y + 1u), d = IMG_READ(2u * x + 1u, 2u * y + 1u);
+        uint r = 0u;
+        for (uint k = 0u; k < 4u; k++) r |= (((ch(a, k) + ch(b, k) + ch(c, k) + ch(d, k) + 2u) >> 2u) << (8u * k));
+        return r;
+    }
+    return IMG_READ(udiv((2u * x + 1u) * iw, 2u * w), udiv((2u * y + 1u) * ih, 2u * h));
+}
+
 // ---- MemoryFill: q[0] = start, end, value, width (bit 0: 24 bit, bit 1: 32 bit, neither: 16 bit).
 // One word per invocation. start and end are word aligned.
 void k_fill(uint gid) {
@@ -170,7 +186,7 @@ void transfer_body(uint gid, uint from_img) {
             for (uint i = 0u; i < sx; i++) {
                 uint xx = x * sx + i, yy = y * sy + j;
                 uint c;
-                if (from_img != 0u) c = px_from_bits(px_encode(IMG_READ(xx, ih - 1u - yy), fi), fi);   // as k_store, then px_read
+                if (from_img != 0u) c = px_from_bits(px_encode(img_read_s(xx, ih - 1u - yy, iw, ih), fi), fi);   // as k_store, then px_read
                 else c = px_read(inp + (in_linear != 0u ? yy * iw + xx : tiled_index(xx, yy, iw)) * bi, fi);
                 ar += ch(c, 0u); ag += ch(c, 1u); ab += ch(c, 2u); aa += ch(c, 3u);
             }
@@ -202,7 +218,7 @@ void k_copy_img(uint gid) {
         uint o = ia + t - sa, m = udiv(o, bpp), k = o - m * bpp;
         uint tile = m >> 6u, tr = udiv(tile, tiles_x);
         uint x = (tile - tr * tiles_x) * 8u + demorton_x(m & 63u), y = tr * 8u + demorton_y(m & 63u);
-        uint e = px_encode(IMG_READ(x, h - 1u - y), fmt);
+        uint e = px_encode(img_read_s(x, h - 1u - y, w, h), fmt);
         v |= ((e >> (8u * k)) & 0xFFu) << (8u * t);
     }
     STW(oa >> 2u, v);
@@ -220,18 +236,34 @@ void k_store(uint gid) {
         uint m = m0 + k, tile = m >> 6u, tiles_x = w / 8u;
         uint tr = udiv(tile, tiles_x);
         uint x = (tile - tr * tiles_x) * 8u + demorton_x(m & 63u), y = tr * 8u + demorton_y(m & 63u);
-        uint e = px_encode(IMG_READ(x, h - 1u - y), fmt);
+        uint e = px_encode(img_read_s(x, h - 1u - y, w, h), fmt);
         for (uint t = 0u; t < bpp; t++) put8(k * bpp + t, e >> (8u * t));
     }
     group_store(word, nwords);
 }
 
 // ---- VRAM to render target: q[0] = addr, w, h, fmt. One pixel per invocation.
+// A larger image (q[3] its size, as img_read_s): one image pixel per invocation, from the native
+// pixel under it.
 void k_load(uint gid) {
     uint addr = q[0].x, w = q[0].y, h = q[0].z, fmt = q[0].w;
-    if (gid >= w * h) return;
-    uint y = udiv(gid, w), x = gid - y * w;
-    IMG_WRITE(x, h - 1u - y, px_decode(addr + tiled_index(x, y, w) * fb_bpp(fmt), fmt));
+    uint iw = q[3].x != 0u ? q[3].x : w, ih = q[3].x != 0u ? q[3].y : h;
+    if (gid >= iw * ih) return;
+    uint Y = udiv(gid, iw), X = gid - Y * iw;   // image pixel; its row Y is native row h - 1 - y
+    uint x = iw == w ? X : udiv(X * w, iw), yi = ih == h ? Y : udiv(Y * h, ih), y = h - 1u - yi;
+    IMG_WRITE(X, Y, px_decode(addr + tiled_index(x, y, w) * fb_bpp(fmt), fmt));
+}
+
+// ---- The top screen at the scaler's size, straight from the render target image (bound as the
+// source) that a display transfer just sent to the framebuffer: q[0].x = 1 for a flipped transfer;
+// q[3] = the image's size (240 s x 400 s). Writes the dst image, 400 s x 240 s, its row 0 the
+// bottom of the screen like the screens main_nx.c shows (k_screen's row order). One pixel each.
+void k_hires(uint gid) {
+    uint iw = q[3].x, ih = q[3].y, OW = ih, OH = iw;
+    if (gid >= OW * OH) return;
+    uint R = udiv(gid, OW), X = gid - R * OW;   // output row (bottom first) and column
+    uint c = IMG_READ(R, q[0].x != 0u ? X : ih - 1u - X);
+    IMG_WRITE(X, R, c | 0xFF000000u);
 }
 
 // ---- Texture in VRAM to an image: q[0] = addr, w, h, fmt (PICA texture format). One texel per
