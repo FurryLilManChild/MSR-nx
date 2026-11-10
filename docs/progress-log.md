@@ -1,5 +1,17 @@
 # Progress log (newest first)
 
+## 2026-11-10 (late morning): 60 holds docked
+
+- run002 (60fps finish test, docked, CPU 1785, GPU 768): 59.7 to 59.9 pictures a second at 1x and
+  59.3 to 59.9 at 1.5x, with 0 to 2 late frames per 5 s (300 frames). Game idle went from about
+  1.7 s to 3.5 to 3.9 s per 5 s: the receipt lines written and flushed to the SD card on the game's
+  thread (about 100 a second) were the cost. At 1.5x the GPU is idle only about 220 ms per 5 s.
+- Stock CPU (1020) is enough: with GPU 460 it made 48, with 307 it made 38 to 42, the GPU busy 98%
+  in both and the game idle about 2.9 s. Handheld 60 needs the GPU work per frame cut by about a
+  third (VRAM work is about 28% of it, draws the rest).
+- The "late" count also counts every frame in 30 fps mode, and the longest gap includes time in
+  the port menu; read them only for 60 fps stretches.
+
 ## 2026-11-10 (later): graphics thread results, 60fps finish test
 
 - run001 (graphics thread test, docked, CPU 1785, GPU 768): 54 to 59 pictures a second at 1x
