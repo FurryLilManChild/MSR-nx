@@ -1,5 +1,15 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 7): run 25 read, test 24 (texup rewritten)
+
+- Run 25 (test 23 self-test, on the Switch): upload and read back, imgcopy and hires match the
+  CPU at 1.5x and 2x; texup differs at every texel. Texel 0,0 (should be pattern 0,0) came from
+  pattern row 87 at 1.5x and row 286 at 2x: the GPU did not take the copied part's last row for
+  texels past it, so the clamp (two ?: initializers in one declaration, sizes divided in the
+  shader) did not work there as on the CPU. Cause inside the compiled shader not known.
+- Test 24: k_texup with the large size worked out on the CPU, each step its own statement and
+  min() for the clamps; the self-test now also says which pattern pixel a wrong texel came from.
+
 ## 2026-11-09 (late, 6): run 24 read, test 23 (scaler self-test)
 
 - Run 24 (test 22) pictures: the large textures do not match their snapshots (a 1.5x copy's

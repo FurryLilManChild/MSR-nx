@@ -376,14 +376,23 @@ uint px_decode_bits(uint e, uint fmt) {
     return pack4((h >> 12u) * 17u, ((h >> 8u) & 15u) * 17u, ((h >> 4u) & 15u) * 17u, (h & 15u) * 17u);
 }
 void k_texup(uint gid) {
-    uint tw = q[0].x, th = q[0].y, fmt = q[0].z, rows = q[0].w;
-    uint sw = q[3].x, sh = q[3].y;   // the snapshot: s * 240 wide (or the target's width), s * rows tall
-    uint TW = udiv(tw * sh, rows), TH = udiv(th * sh, rows);   // the texture at the same scale
+    // q[1].x, q[1].y = the large texture's size (TW = tw * s, TH = th * s), worked out on the CPU.
+    // Test 23's self-test: the first version (sizes divided here, clamps as ?: in one declaration)
+    // gave wrong texels on the Switch while matching on the CPU; this one keeps every step plain.
+    uint fmt = q[0].z;
+    uint TW = q[1].x;
+    uint TH = q[1].y;
+    uint sw = q[3].x;
+    uint sh = q[3].y;
     if (gid >= TW * TH) return;
-    uint Y = udiv(gid, TW), X = gid - Y * TW;
-    uint ym = TH - 1u - Y;                     // scaled memory row, from the top of the texture
-    uint x = X < sw ? X : sw - 1u, y = ym < sh ? ym : sh - 1u;
-    IMG_WRITE(X, Y, px_decode_bits(px_encode(IMG_READ(x, sh - 1u - y), fmt), fmt));
+    uint Y = udiv(gid, TW);
+    uint X = gid - Y * TW;
+    uint ym = TH - 1u - Y;           // scaled memory row, from the top of the texture
+    uint yc = min(ym, sh - 1u);      // past the copied rows: the last one
+    uint xc = min(X, sw - 1u);
+    uint row = sh - 1u - yc;
+    uint c = IMG_READ(xc, row);
+    IMG_WRITE(X, Y, px_decode_bits(px_encode(c, fmt), fmt));
 }
 
 // ---- A snapshot of an image (bound as the source) into another of the same size (q[3] the size).

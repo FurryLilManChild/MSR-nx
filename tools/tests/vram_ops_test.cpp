@@ -31,6 +31,7 @@ static u32 g_dst_w = 0;   // 0: IMG_WRITE goes to g_img (k_load, k_texdecode); e
 #define IMG_WRITE(x, y, v) (g_dst_w ? (g_dst[(y) * g_dst_w + (x)] = (v)) : (g_img[(y) * g_img_w + (x)] = (v)))
 #define OUTW(i, v) (g_out[(i)] = (v))
 typedef uint32_t uint;
+static inline uint min(uint a, uint b) { return a < b ? a : b; }
 #include "vram_ops.inc"
 
 template <class F> static void run(uint n, F f) { for (uint i = 0; i < n; i++) f(i); }
@@ -462,7 +463,7 @@ int main() {
             std::vector<u32> ref(g_img.begin(), g_img.begin() + tw * th);
             std::copy(snap.begin(), snap.end(), g_img.begin());
             g_img_w = w;
-            q[0] = {tw, th, fmt, 400}; q[3] = {w, h, 0, 0};
+            q[0] = {tw, th, fmt, 400}; q[1] = {tw, th, 0, 0}; q[3] = {w, h, 0, 0};
             g_dst_w = tw;
             run(tw * th, k_texup);
             g_dst_w = 0;
@@ -479,7 +480,7 @@ int main() {
             g_img_w = w;
             for (u32 i = 0; i < w * h; i++) g_img[i] = rnd() ^ (rnd() << 16);
             std::vector<u32> nat(g_img.begin(), g_img.begin() + w * h);
-            q[0] = {tw, th, fmt, 400}; q[3] = {w, h, 0, 0};
+            q[0] = {tw, th, fmt, 400}; q[1] = {tw, th, 0, 0}; q[3] = {w, h, 0, 0};
             g_dst_w = tw;
             run(tw * th, k_texup);
             std::vector<u32> one(g_dst.begin(), g_dst.begin() + tw * th);
@@ -487,7 +488,7 @@ int main() {
             for (u32 y = 0; y < 2 * h; y++) for (u32 x = 0; x < 2 * w; x++) g_img[y * 2 * w + x] = nat[(y / 2) * w + x / 2];
             std::vector<u32> big(512 * 1024);
             g_dst.assign(512 * 1024, 0);
-            q[0] = {tw, th, fmt, 400}; q[3] = {2 * w, 2 * h, 0, 0};
+            q[0] = {tw, th, fmt, 400}; q[1] = {2 * tw, 2 * th, 0, 0}; q[3] = {2 * w, 2 * h, 0, 0};
             g_dst_w = 2 * tw;
             run(4 * tw * th, k_texup);
             g_dst_w = 0;

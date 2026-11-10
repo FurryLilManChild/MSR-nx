@@ -17,6 +17,7 @@ static u32* g_out;
 #define IMG_READ(x, y) g_src[(y) * g_src_w + (x)]
 #define IMG_WRITE(x, y, v) (g_dst[(y) * g_dst_w + (x)] = (v))
 #define OUTW(i, v) (g_out[(i)] = (v))
+static inline uint min(uint a, uint b) { return a < b ? a : b; }
 #include "vram_ops.inc"
 
 extern "C" void vref_setup(const u32 qq[16], u32* vram, const u32* src, u32 src_w, u32* dst, u32 dst_w, u32* out) {

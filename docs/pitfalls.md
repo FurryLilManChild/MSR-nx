@@ -72,4 +72,7 @@
 - A resolution scaler that only renders the eye targets larger shows nothing in this game: its
   picture passes through GX texture copies (VRAM, native size) and full-screen redraws several
   times per frame. The copies need large-size counterparts too.
+- Compute kernels that pass vram_ops_test on a PC can still differ on the Switch (k_texup in test
+  23). Each new kernel gets a start-up check on the Switch against the same code on its CPU
+  (dk_pica.c dkr_scaler_selftest, vram_ref.cpp).
 

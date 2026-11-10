@@ -581,7 +581,7 @@ static DkImage* shadow_texture(u32 v, u32 fmt, u32 w, u32 h) {
                 if (!shadow_image(&s->tex, k * SHADOW_SLOT + SHADOW_SLOT / 2, TW, TH, SHADOW_SLOT / 2)) { s->valid = 0; return 0; }
                 s->tex_h = h;
             }
-            u32 q[16] = {w, h, fmt, s->rows};
+            u32 q[16] = {w, h, fmt, s->rows, TW, TH};
             q[12] = s->sw; q[13] = s->sh;
             g_bound_color = g_bound_depth = 0;
             kernel(K_TEXUP, q, TW * TH, &s->snap, &s->tex);
@@ -2189,6 +2189,8 @@ int vref_run(const char* name, u32 n);
 static u32 sc_rng = 12345;
 static u32 sc_rand(void) { sc_rng = sc_rng * 1103515245u + 12345u; return sc_rng; }
 // image -> u32 rows (image row 0 first) through the readback buffer
+static const u32* g_sc_pat;
+static u32 g_sc_pat_n, g_sc_pat_w;
 static const u32* sc_read(const DkImage* img, u32 w, u32 h) {
     u32 q[16] = {0};
     q[12] = w; q[13] = h;
@@ -2207,6 +2209,17 @@ static void sc_compare(const char* what, const u32* gpu, const u32* cpu, u32 w, 
             }
     if (!bad) msr_receipt("scaler self-test: %s: same on the GPU and the CPU (%ux%u)", what, w, h);
     else msr_receipt("scaler self-test: %s: %u of %u pixels differ; first at %u,%u (GPU %08X, CPU %08X)", what, bad, w * h, fx, fy, gv, cv);
+    if (bad && g_sc_pat) {   // where in the pattern the GPU's texels came from, for a few of them
+        static const u32 pts[6][2] = {{0, 0}, {1, 0}, {0, 1}, {100, 100}, {0, 700}, {300, 500}};
+        for (int k = 0; k < 6; k++) {
+            u32 x = pts[k][0], y = pts[k][1];
+            if (x >= w || y >= h) continue;
+            u32 v = gpu[y * w + x], hit = ~0u;
+            for (u32 i = 0; i < g_sc_pat_n; i++) if (g_sc_pat[i] == v) { hit = i; break; }
+            if (hit == ~0u) msr_receipt("scaler self-test:   GPU %u,%u = %08X, not in the pattern", x, y, v);
+            else msr_receipt("scaler self-test:   GPU %u,%u = pattern %u,%u", x, y, hit % g_sc_pat_w, hit / g_sc_pat_w);
+        }
+    }
 }
 void dkr_scaler_selftest(void) {
     if (!g_shadow_mem) return;
@@ -2222,6 +2235,7 @@ void dkr_scaler_selftest(void) {
         u32* got = malloc(TW * TH * 4);
         if (!pat || !ref || !got) { free(pat); free(ref); free(got); return; }
         for (u32 i = 0; i < sw * sh; i++) pat[i] = sc_rand() ^ (sc_rand() >> 16);
+        g_sc_pat = pat; g_sc_pat_n = sw * sh; g_sc_pat_w = sw;
         // the pattern into A the way the renderer uploads pictures
         u32 off = dyn_alloc(sw * sh * 4, 256);
         memcpy(g_dyn_cpu + off, pat, sw * sh * 4);
@@ -2242,7 +2256,7 @@ void dkr_scaler_selftest(void) {
         snprintf(what, sizeof what, "snapshot (imgcopy), %d.%dx", sc / 2, sc & 1 ? 5 : 0);
         sc_compare(what, sc_read(&B, sw, sh), pat, sw, sh);
         // the large texture
-        u32 q2[16] = {tw, th, 0, 400};
+        u32 q2[16] = {tw, th, 0, 400, TW, TH};
         q2[12] = sw; q2[13] = sh;
         kernel(K_TEXUP, q2, TW * TH, &B, &T);
         const u32* g = sc_read(&T, TW, TH);
@@ -2262,6 +2276,7 @@ void dkr_scaler_selftest(void) {
         vref_run("hires", sw * sh);
         snprintf(what, sizeof what, "screen picture (hires), %d.%dx", sc / 2, sc & 1 ? 5 : 0);
         sc_compare(what, got, ref, sh, sw);
+        g_sc_pat = 0;
         free(pat); free(ref); free(got);
     }
 }
