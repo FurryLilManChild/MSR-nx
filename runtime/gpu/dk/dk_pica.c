@@ -180,7 +180,7 @@ static void encode_color_px(u8* p, u32 fmt, const u8* c) {
 #define VRAM_BASE 0x1F000000u
 #define VRAM_SIZE (6u << 20)
 #define VRAM_PAGES (VRAM_SIZE >> 12)
-enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_TEXUP, K_COUNT };
+enum { K_FILL, K_COPY, K_TRANSFER, K_STORE, K_LOAD, K_TEXDECODE, K_SCREEN, K_TRANSFER_IMG, K_COPY_IMG, K_HIRES, K_TEXUP, K_IMGCOPY, K_COUNT };
 static DkMemBlock g_vram;
 static DkGpuAddr g_vram_gpu;
 static DkShader g_k[K_COUNT];
@@ -558,15 +558,12 @@ static void shadow_capture(const u32* d, u32 size, u32 iw, u32 ig, u32 ow, u32 o
         h->sw = src->sw; h->sh = src->sh;
         h->tex_h = 0;
     }
-    ts_mark(TS_VRAM);
-    gpu_barrier();   // the target's draws first
-    DkImageView sv, dv;
-    dkImageViewDefaults(&sv, &src->img);
-    dkImageViewDefaults(&dv, &h->snap);
-    DkImageRect r = {0, 0, 0, src->sw, src->sh, 1};
-    dkCmdBufCopyImage(g_cmd, &sv, &r, &dv, &r, 0);
-    GPU_WORK();
-    gpu_barrier();
+    // a compute copy, like every other step here (test 20 used dkCmdBufCopyImage, the copy engine,
+    // and the scaled screens came out dark)
+    u32 q[16] = {0};
+    q[12] = src->sw; q[13] = src->sh;
+    g_bound_color = g_bound_depth = 0;
+    kernel(K_IMGCOPY, q, src->sw * src->sh, &src->img, &h->snap);
     h->dst = d[1]; h->span = out_span; h->tw = (ow + og) / (8 * bpp); h->rows = src->h; h->fmt = src->fmt;
     h->built = 0;
     h->valid = 1;
@@ -1853,10 +1850,10 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     DkMemBlockMaker mm;
     static const u8* const kcode[K_COUNT] = {vram_fill_dksh, vram_copy_dksh, vram_transfer_dksh, vram_store_dksh,
                                              vram_load_dksh, vram_texdecode_dksh, vram_screen_dksh, vram_transfer_img_dksh, vram_copy_img_dksh,
-                                             vram_hires_dksh, vram_texup_dksh};
+                                             vram_hires_dksh, vram_texup_dksh, vram_imgcopy_dksh};
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
-                                       vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size};
+                                       vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size, vram_imgcopy_dksh_size};
     u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
     u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);

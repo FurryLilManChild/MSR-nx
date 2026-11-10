@@ -385,3 +385,12 @@ void k_texup(uint gid) {
     uint x = X < sw ? X : sw - 1u, y = ym < sh ? ym : sh - 1u;
     IMG_WRITE(X, Y, px_decode_bits(px_encode(IMG_READ(x, sh - 1u - y), fmt), fmt));
 }
+
+// ---- A snapshot of an image (bound as the source) into another of the same size (q[3] the size).
+// One pixel per invocation.
+void k_imgcopy(uint gid) {
+    uint w = q[3].x, h = q[3].y;
+    if (gid >= w * h) return;
+    uint y = udiv(gid, w), x = gid - y * w;
+    IMG_WRITE(x, y, IMG_READ(x, y));
+}

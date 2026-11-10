@@ -1,5 +1,15 @@
 # Progress log (newest first)
 
+## 2026-11-09 (late, 4): run 22 read, test 21
+
+- Run 22 (test 20): 1x fine; 1.5x and 2x nearly black (p039 at 1.5x: a dark, enlarged corner of
+  the scene; p046 at 2x: black). The receipt shows the large textures in use (276 to 444 per 5 s).
+  vram_ops_test now also checks k_texup at 2x (a doubled snapshot gives the doubled 1x texture):
+  passes, so the kernel's arithmetic is not it. The snapshot was taken with dkCmdBufCopyImage,
+  which deko3d runs on the copy engine, the one step not done by the compute kernels used
+  everywhere else; suspected, not proven.
+- Test 21: the snapshot is a compute kernel (k_imgcopy) like the rest.
+
 ## 2026-11-09 (late, 3): run 21 read, test 20 (scaled textures for the game's own passes)
 
 - Run 21 (test 19): the large pictures were now shown for nearly every picture (141 to 178 per 5 s,
