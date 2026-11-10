@@ -8,7 +8,7 @@ enum { CLOCK_STOCK, CLOCK_BOOST, CLOCK_COUNT };
 #define GPU_COUNT 4
 // the 3DS buttons a Switch button can be given to (bit order of msr_buttons)
 enum { B3_A, B3_B, B3_SELECT, B3_START, B3_R = 8, B3_L, B3_X, B3_Y };
-#define NBIND 8
+#define NBIND 9   // the 3DS buttons, then Next beam
 
 typedef struct {
     int layout;
@@ -17,12 +17,12 @@ typedef struct {
     int show_fps;      // the frame counter
     int sync;          // GPU sync: 0 Safe, 1 Fewer waits, 2 Lean (dk_pica.c gpu_barrier)
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
-    u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select
+    u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam
 } PortSettings;
 
 extern PortSettings g_set;
 extern int g_menu_open;
-extern int g_map_view;
+extern int g_map_view;      // single-screen mode: the game's pause menu frame is on the bottom screen (main_nx.c), so that is shown
 extern int g_auto_bottom;   // single-screen mode: the bottom screen shown by itself (the file select screen is up)   // single-screen mode (top screen only): the bottom screen shown instead, a minus tap toggles it
 
 void port_menu_init(const char* settings_path);
@@ -31,7 +31,7 @@ void port_menu_init(const char* settings_path);
 u32 port_menu_input(u64 held);
 // The menu panel, PANEL_W x PANEL_H RGBA, when it changed since the last call (else 0).
 #define PANEL_W 800
-#define PANEL_H 520
+#define PANEL_H 560
 const u32* port_menu_panel(void);
 // Where the screens go on the 1280x720 output for the current layout (w or h 0: not shown).
 typedef struct { int x, y, w, h; } Rect;
@@ -40,5 +40,6 @@ void port_menu_layout(Rect* top, Rect* bottom);
 #define FPS_W 128
 #define FPS_H 24
 const u32* port_menu_fps(int fps10);
+int port_menu_beam_request(void);       // Next beam was pressed since the last call (main_nx.c taps the touch screen)
 void port_menu_clocks_refresh(void);   // every few seconds: the chosen clocks again if the system changed them
 void port_menu_clocks_restore(void);   // at exit: the system's clocks

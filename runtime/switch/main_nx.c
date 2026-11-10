@@ -227,6 +227,40 @@ static int file_select_on_bottom(void) {
     return ((b[(239 - 9) * 320 + 60] >> 16) & 0xFF) < 80;
 }
 
+// The game's pause menu frame is on the bottom screen: the light blue line under its header (y 24,
+// x 76 to 94 and 223 to 227), dark just above. The map and the Samus screens of the pause menu both
+// have it, and so does the Samus screen the game brings up to explain a new ability; nothing else
+// in runs 10 to 18's bottom-screen pictures does (gameplay HUD, title, file select, logo).
+static int pause_frame_on_bottom(void) {
+    const u32* b = g_upload + 400 * 240;
+    static const int xs[5] = {76, 80, 94, 223, 227};
+    for (int k = 0; k < 5; k++) {
+        u32 c = b[(239 - 24) * 320 + xs[k]];
+        int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
+        if (!(bl > 150 && g > 100 && r < 120)) return 0;
+    }
+    return ((b[(239 - 23) * 320 + 67] >> 16) & 0xFF) < 80;
+}
+
+// The beam column on the right of the bottom screen: three slots (power beam, then the beams the
+// game adds). The selected one is lit (bright pixels, every second one counted); the others are dim. -1: none lit.
+static const int k_beam_y[3] = {8, 84, 160};   // slot tops, 70 rows each, x 250 to 319
+static int selected_beam_slot(void) {
+    const u32* b = g_upload + 400 * 240;
+    int best = -1, best_n = 150;   // lit: 218 to 381 in runs 10 to 18, menus 47 to 123
+    for (int k = 0; k < 3; k++) {
+        int n = 0;
+        for (int y = k_beam_y[k]; y < k_beam_y[k] + 68; y += 2)
+            for (int x = 252; x < 318; x += 2) {
+                u32 c = b[(239 - y) * 320 + x];
+                int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
+                if (r > 180 || g > 180 || bl > 180) n++;
+            }
+        if (n > best_n) { best_n = n; best = k; }
+    }
+    return best;
+}
+
 // An LCD framebuffer is 240 pixels per column, columns left to right, each column bottom to top.
 static void convert_screen(int screen, u32* out, int flip) {
     MsrFramebuffer* f = &msr_fb[screen];
@@ -259,6 +293,7 @@ static void convert_screen(int screen, u32* out, int flip) {
 
 void dkr_frame_end(void);
 static int g_gpu_render;
+static int g_shot_request, g_shots_left = 6;   // pictures of both screens when the pause view first comes up
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
     // only convert the screens when the game showed a new picture on one of them; the menu (open,
@@ -308,6 +343,16 @@ static void present(void) {
         static int on_count, off_count;
         if (g_set.layout == LAYOUT_TOP_ONLY && file_select_on_bottom()) { off_count = 0; if (++on_count >= 3 && !g_auto_bottom) { g_auto_bottom = 1; msr_receipt("single screen: file select up, showing the bottom screen"); } }
         else { on_count = 0; if (++off_count >= 10 && g_auto_bottom) { g_auto_bottom = 0; msr_receipt("single screen: file select gone, back to the top screen"); } }
+        // the pause menu (Start, minus or plus) and the screens explaining a new ability: shown while
+        // the game has them up, so closing them any way (B too) goes back to the top screen
+        static int p_on, p_off;
+        if (g_set.layout == LAYOUT_TOP_ONLY && pause_frame_on_bottom()) {
+            p_off = 0;
+            if (++p_on >= 2 && !g_map_view) { g_map_view = 1; msr_receipt("single screen: pause menu up, showing the bottom screen"); if (g_shots_left > 0) { g_shots_left--; g_shot_request = 1; } }
+        } else {
+            p_on = 0;
+            if (++p_off >= 3 && g_map_view) { g_map_view = 0; msr_receipt("single screen: pause menu gone, back to the top screen"); }
+        }
     }
     // the screens where the port menu's layout puts them
     Rect tr, br;
@@ -321,9 +366,9 @@ static void present(void) {
         // single-screen mode: the bottom screen's readouts, cut out of it and drawn at 2x on the top
         // one (energy, missiles, Aeion gauge and the ability cross; the selected ability; the
         // Metroid DNA and Metroids left). Bottom-screen coordinates, rows counted from the top.
-        static const struct { int sx, sy, w, h, dx, dy; } k_hud[3] = {
+        static struct { int sx, sy, w, h, dx, dy; } k_hud[3] = {
             {0, 0, 160, 60, 48, 8},              // top left
-            {250, 10, 70, 70, 1240 - 8 - 140, 8},   // top right
+            {250, 8, 70, 70, 1240 - 8 - 140, 8},    // top right: the selected beam (its slot, below)
             {60, 212, 185, 28, 48, 720 - 8 - 56},   // bottom left
         };
         // Drawn (not blitted) so the dark backgrounds can be see-through: hud_fsh.glsl.
@@ -357,6 +402,7 @@ static void present(void) {
         DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
         dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
         dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
+        { int sl = selected_beam_slot(); k_hud[1].sy = k_beam_y[sl < 0 ? 0 : sl]; }
         for (int k = 0; k < 3; k++) {
             float rect[8] = {(float)k_hud[k].dx, (float)(FB_H - k_hud[k].dy - 2 * k_hud[k].h), (float)(2 * k_hud[k].w), (float)(2 * k_hud[k].h),
                              (float)k_hud[k].sx, (float)(240 - k_hud[k].sy - k_hud[k].h), (float)k_hud[k].w, (float)k_hud[k].h};
@@ -561,6 +607,24 @@ static void input_poll(void) {
             msr_touch_down = 1; msr_touch_x = (u16)x; msr_touch_y = (u16)y;
         }
     }
+    // Next beam (port menu, ZR): a tap on the next slot of the beam column, as a finger would. An
+    // empty slot does nothing, so if the lit slot has not changed a moment later the one after it is
+    // tried (each slot once).
+    static int bt_frames, bt_from, bt_target, bt_tries;
+    if (port_menu_beam_request() && !g_menu_open && !bt_frames) {
+        bt_from = selected_beam_slot();
+        if (bt_from >= 0) { bt_target = (bt_from + 1) % 3; bt_tries = 0; bt_frames = 1; }
+    }
+    if (bt_frames) {
+        if (bt_frames <= 4) { msr_touch_down = 1; msr_touch_x = 285; msr_touch_y = (u16)(k_beam_y[bt_target] + 35); }
+        if (++bt_frames > 16) {   // about a quarter second: did the lit slot move?
+            int now_sel = selected_beam_slot();
+            if (now_sel != bt_from || ++bt_tries >= 2) {
+                msr_receipt("input: next beam, slot %d to %d", bt_from, now_sel);
+                bt_frames = 0;
+            } else { bt_target = (bt_target + 1) % 3; bt_frames = 1; }
+        }
+    }
 }
 
 // ---- main -------------------------------------------------------------------------------------------
@@ -579,7 +643,7 @@ int main(int argc, char** argv) {
     }
     msr_log_open(g_run_dir);
     int cpu_render = stat(DIR "/cpurender", &st) == 0;   // create this file to draw with the CPU reference renderer
-    msr_receipt("MSR-nx Switch test build 16 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
+    msr_receipt("MSR-nx Switch test build 17 (%s)", cpu_render ? "CPU reference renderer" : "deko3d PICA renderer");
     snprintf(msr_save_dir, sizeof msr_save_dir, DIR "/save");
     sched_realtime = 1;
     { extern size_t sched_thread_stack; sched_thread_stack = 4u << 20; }
@@ -720,6 +784,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        if (g_shot_request) { g_shot_request = 0; shot_at = now + 300000000ull; }   // the pause view: once it has settled
         if (shot_at && now >= shot_at) {
             char tag[48];
             snprintf(tag, sizeof tag, "t%03d", (int)((now - g_start_ns) / 1000000000ull));

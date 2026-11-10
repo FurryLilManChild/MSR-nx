@@ -15,6 +15,8 @@ PortSettings g_set;
 int g_menu_open;
 int g_map_view;
 int g_auto_bottom;
+static int g_beam_request;
+int port_menu_beam_request(void) { int r = g_beam_request; g_beam_request = 0; return r; }
 static char g_path[256];
 static int g_row, g_wait_bind = -1, g_dirty = 1;
 static u32 g_panel[PANEL_W * PANEL_H];
@@ -23,10 +25,11 @@ extern volatile int sched_pause_request;   // os/sched.c holds the game at its n
 
 static const char* k_layout_names[LAYOUT_COUNT] = {"Top large, bottom small", "Side by side", "Stacked", "Single screen"};
 static const char* k_clock_names[CLOCK_COUNT] = {"Stock (1020 MHz)", "Boost (1785 MHz)"};
-static const char* k_bind_names[NBIND] = {"3DS A", "3DS B", "3DS X", "3DS Y", "3DS L", "3DS R", "3DS Start", "3DS Select"};
-static const int k_bind_bits[NBIND] = {B3_A, B3_B, B3_X, B3_Y, B3_L, B3_R, B3_START, B3_SELECT};
+static const char* k_bind_names[NBIND] = {"3DS A", "3DS B", "3DS X", "3DS Y", "3DS L", "3DS R", "3DS Start", "3DS Select", "Next beam"};
+static const int k_bind_bits[NBIND] = {B3_A, B3_B, B3_X, B3_Y, B3_L, B3_R, B3_START, B3_SELECT, -1};   // -1: not a 3DS button
 static const u64 k_bind_default[NBIND] = {HidNpadButton_A, HidNpadButton_B, HidNpadButton_X, HidNpadButton_Y,
-                                          HidNpadButton_L, HidNpadButton_R, HidNpadButton_Plus, HidNpadButton_Minus};
+                                          HidNpadButton_L, HidNpadButton_R, HidNpadButton_Plus, HidNpadButton_Minus,
+                                          HidNpadButton_ZR};
 static const struct { u64 b; const char* name; } k_sw[] = {
     {HidNpadButton_A, "A"}, {HidNpadButton_B, "B"}, {HidNpadButton_X, "X"}, {HidNpadButton_Y, "Y"},
     {HidNpadButton_L, "L"}, {HidNpadButton_R, "R"}, {HidNpadButton_ZL, "ZL"}, {HidNpadButton_ZR, "ZR"},
@@ -253,7 +256,7 @@ u32 port_menu_input(u64 held) {
     // of either goes back the same way.
     int single = g_set.layout == LAYOUT_TOP_ONLY;
     static unsigned long long start_until;
-    if (single && (down & HidNpadButton_Plus)) { g_map_view = !g_map_view; start_until = now + 100000000ull; }
+    if (single && (down & HidNpadButton_Plus)) start_until = now + 100000000ull;
     int minus = (held & HidNpadButton_Minus) != 0;
     int capture_combo = (held & HidNpadButton_ZL) && (held & HidNpadButton_ZR);
     if (minus) {
@@ -265,8 +268,9 @@ u32 port_menu_input(u64 held) {
         }
     } else {
         if (minus_since && !minus_used && now - minus_since < 500000000ull) {
-            // single-screen mode: the tap shows or hides the bottom screen (map); otherwise Select
-            if (single) { g_map_view = !g_map_view; start_until = now + 100000000ull; }
+            // single-screen mode: the tap is the game's Start (its pause menu, which brings the bottom
+            // screen up by itself, main_nx.c); otherwise Select
+            if (single) start_until = now + 100000000ull;
             else select_until = now + 100000000ull;
         }
         minus_since = 0;
@@ -275,6 +279,7 @@ u32 port_menu_input(u64 held) {
     u32 b = 0;
     for (int k = 0; k < NBIND; k++) {
         u64 sb = g_set.bind[k];
+        if (k_bind_bits[k] < 0) { if (down & sb) g_beam_request = 1; continue; }   // Next beam
         if (single && (sb == HidNpadButton_Minus || sb == HidNpadButton_Plus)) continue;   // the map buttons there
         if (sb == HidNpadButton_Minus) { if (now < select_until) b |= 1u << k_bind_bits[k]; }
         else if (held & sb) b |= 1u << k_bind_bits[k];
