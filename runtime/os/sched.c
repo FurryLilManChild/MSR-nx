@@ -230,6 +230,7 @@ volatile int sched_pause_request;
 // steps take the measured frame time instead (tools/gen/generate.py PATCHES). 33 and 0: the 3DS's 30.
 volatile u32 msr_frame_limit_ms = 33;
 volatile int msr_fps60;
+volatile int sched_resumed;
 static void pause_point(void) {
     if (!sched_pause_request || !sched_realtime) return;
     u64 t0 = wall_ns();
@@ -238,6 +239,7 @@ static void pause_point(void) {
         nanosleep(&ts, 0);
     }
     g_rt_start += wall_ns() - t0;
+    sched_resumed = 1;   // the frame gap report leaves the paused time out
 }
 
 int sched_async_pending(void);   // hle_hid_gsp.c: interrupts from the graphics thread

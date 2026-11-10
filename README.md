@@ -8,9 +8,9 @@ copy of the game.
 
 ## Status
 
-**Version 0.5.0 is the first test release.** The game is playable from the start, at the 3DS's 30 frames per second,
-handheld or docked at stock clocks. It has not been played to the end, so expect problems further in, and please
-report them (see below).
+**Version 0.6.0 is a test release.** The game is playable from the start, at the 3DS's 30 frames per second,
+handheld or docked at stock clocks. New in 0.6.0: an optional 60 frames per second, which holds docked with the CPU
+on boost. It has not been played to the end, so expect problems further in, and please report them (see below).
 
 | Part | State |
 | --- | --- |
@@ -19,6 +19,8 @@ report them (see below).
 | Renderer | deko3d: the game's shaders translated ahead of time, missing ones compiled on the Switch and cached |
 | Screens | Four layouts, including a single-screen mode for TV play |
 | Resolution | 1x, 1.5x or 2x for the 3D top screen |
+| Frame rate | 30 (as on the 3DS) or 60 |
+| Threads | The game's graphics commands run on their own CPU core, beside the game, as the 3DS's GPU did |
 
 Session-by-session notes: [docs/progress-log.md](docs/progress-log.md).
 
@@ -29,6 +31,10 @@ Session-by-session notes: [docs/progress-log.md](docs/progress-log.md).
   missing meanwhile). It is saved to `sdmc:/switch/msr/shadercache/` and is instant after that.
 - At 2x the GPU works hard: expect slowdown handheld at stock clocks. Raise the GPU clock in the port menu or use
   1.5x.
+- 60 frames per second holds docked with the CPU on boost, at 1x and (just) at 1.5x. Handheld it runs at about 40
+  (GPU 307 MHz) to 48 (GPU 460 MHz): the GPU is the limit there. 2x at 60 is too much for the GPU.
+- At 60 the game runs with patches to its frame timing. If anything moves at the wrong speed at 60 and not at 30,
+  please report it.
 - Single-screen mode reads the bottom screen to know what is up (pause menu, file select, ability screens). A screen
   it does not know stays on the top screen view: tap minus or plus to pause and see the bottom screen.
 
@@ -37,7 +43,7 @@ Session-by-session notes: [docs/progress-log.md](docs/progress-log.md).
 You need a Switch with custom firmware (Atmosphere) and your own copy of the game: the USA cartridge, dumped
 **decrypted** as a `.3ds` file (GodMode9 makes one with "Dump cartridge" and then "Decrypt").
 
-1. Download `MSR-nx-v0.5.0-switch.zip` from this repository's **Releases** page.
+1. Download `MSR-nx-v0.6.0-switch.zip` from this repository's **Releases** page.
 2. Extract the zip to the root of your SD card. It creates `switch/msr/` with `msr.nro` in it.
 3. On a PC with Python 3, make the game files from your dump with the script in the zip:
    `python extract_3ds.py "Metroid - Samus Returns (USA) (En,Fr,Es).3ds" msr_files`
@@ -74,6 +80,8 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 | --- | --- |
 | Screen layout | Top large with bottom small, side by side, stacked, single screen |
 | 3D screen resolution | 1x (native), 1.5x, 2x |
+| Frame rate | 30 (3DS) or 60; for 60, play docked with the CPU clock on boost |
+| Graphics thread | On (the default) or off, for comparing |
 | CPU clock | Stock (1020 MHz) or boost (1785 MHz) |
 | GPU clock | System default, 460, 614 or 768 MHz |
 | Frame counter | On or off |
@@ -83,7 +91,7 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 ## Reporting problems
 
 Open an issue with where in the game it happened, what you saw, and the newest folder from
-`sdmc:/switch/msr/switchlogs/` (`receipt.txt` and any pictures in it). The last ten runs are kept.
+`sdmc:/switch/msr/switchlogs/` (`receipt.txt` and any pictures in it). The last thirty runs are kept.
 
 ## Building
 

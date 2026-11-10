@@ -490,7 +490,9 @@ static void gsp_latch_framebuffers(void) {
         }
         if (screen == 0) {   // the time between the game's top-screen pictures (speed report)
             static unsigned long long last;
+            extern volatile int sched_resumed;
             unsigned long long now = mono_ns();
+            if (sched_resumed) { sched_resumed = 0; last = 0; }   // after the port menu
             if (last) {
                 unsigned long long gap = now - last;
                 msr_frame_gaps[0]++;

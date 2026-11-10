@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.5.0 + 60fps finish test"
+#define MSR_VERSION "0.6.0"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -892,8 +892,12 @@ int main(int argc, char** argv) {
                                 (i1 - i0) / 1000000ull, (g1 - g0) / 1000000ull, ((i1 - i0) - (g1 - g0)) / 1000000ull,
                                 (b1 - b0) / 1000000ull, msr_gx_async ? "on" : "off");
                     unsigned fg[3] = {msr_frame_gaps[0], msr_frame_gaps[1], msr_frame_gaps[2]};
-                    msr_receipt("  game frames: %u, %u of them late (missed a 60 Hz slot), %u missed two or more; longest %.1f ms",
-                                fg[0] - f0[0], fg[1] - f0[1], fg[2] - f0[2], msr_frame_worst_ns / 1e6);
+                    if (g_set.fps60)
+                        msr_receipt("  game frames: %u, %u of them late (missed a 60 Hz slot), %u missed two or more; longest %.1f ms",
+                                    fg[0] - f0[0], fg[1] - f0[1], fg[2] - f0[2], msr_frame_worst_ns / 1e6);
+                    else
+                        msr_receipt("  game frames: %u (frame rate 30), %u more than 35 ms after the last; longest %.1f ms",
+                                    fg[0] - f0[0], fg[2] - f0[2], msr_frame_worst_ns / 1e6);
                     msr_frame_worst_ns = 0;
                     for (int k = 0; k < 3; k++) f0[k] = fg[k];
                     i0 = i1; g0 = g1; b0 = b1;

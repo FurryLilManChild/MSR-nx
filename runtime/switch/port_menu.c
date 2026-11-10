@@ -188,8 +188,8 @@ static void draw(void) {
         else if (r == ROW_CLOCK) { label = "CPU clock"; snprintf(v, sizeof v, "< %s >", k_clock_names[g_set.clock]); }
         else if (r == ROW_GPU) { label = "GPU clock"; snprintf(v, sizeof v, "< %s >", k_gpu_names[g_set.gpu]); }
         else if (r == ROW_SYNC) { static const char* sn[3] = {"Safe", "Fewer waits", "Lean"}; label = "GPU sync"; snprintf(v, sizeof v, "< %s >", sn[g_set.sync]); }
-        else if (r == ROW_GXT) { label = "Graphics thread (test)"; snprintf(v, sizeof v, "< %s >", g_set.gxthread ? "Off" : "On"); }
-        else if (r == ROW_RATE) { label = "Frame rate (test)"; snprintf(v, sizeof v, "< %s >", g_set.fps60 ? "60" : "30 (3DS)"); }
+        else if (r == ROW_GXT) { label = "Graphics thread"; snprintf(v, sizeof v, "< %s >", g_set.gxthread ? "Off" : "On"); }
+        else if (r == ROW_RATE) { label = "Frame rate"; snprintf(v, sizeof v, "< %s >", g_set.fps60 ? "60" : "30 (3DS)"); }
         else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
         else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }

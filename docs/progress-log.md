@@ -1,5 +1,13 @@
 # Progress log (newest first)
 
+## 2026-11-10 (noon): 0.6.0 packaged
+
+- 0.6.0: 60 fps option and the graphics thread, "(test)" dropped from their port menu rows, logs off
+  the game's thread. The frame gap report leaves out port menu time (sched_resumed) and at 30 fps
+  counts only gaps over 35 ms. NACP "MSR-nx" 0.6.0. Release notes in docs/release-0.6.0.md; the zip
+  is in C:\MSR-nx\release (README, LICENSE, NOTICE, extract_3ds.py, switch/msr/msr.nro).
+- Handheld 60 (GPU work per frame cut by about a third) is the next step when this project resumes.
+
 ## 2026-11-10 (late morning): 60 holds docked
 
 - run002 (60fps finish test, docked, CPU 1785, GPU 768): 59.7 to 59.9 pictures a second at 1x and
