@@ -82,3 +82,6 @@
 - Function pointers made from the pc (`ldr rX, =offset; add rX, pc`) are invisible to call and
   pointer scans. The generator now finds Thumb ones itself; a missed one stops the game with
   "unknown call target" only when that path first runs (issue 1: snprintf's character writer).
+- Callbacks reached only through stored pointers, especially ones starting with `mov r0, r0`, are
+  missed by prologue-based function scans. The generator sweeps for uncovered pointer targets and
+  for code right after each function (issue 1, second report).

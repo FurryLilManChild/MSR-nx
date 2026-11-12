@@ -1,5 +1,22 @@
 # Progress log (newest first)
 
+## 2026-11-12: issue 1, second crash (flying bug touching Samus)
+
+- JAGSTAX's run008 and run009 (0.6.1): "fatal: call to 001892E0, not a known function (from lr
+  002DB574)". 0x2DB570 is `blx r3` to a callback stored in an object; 0x1892E0 starts with
+  `mov r0, r0` and is reached only through an absolute pointer (literal at 0x14D828), so the
+  function list missed it.
+- The generator (decode.py, unreached_functions) now also adds, until nothing new turns up:
+  pointers anywhere in the image to code no known function covers (Thumb only when it starts by
+  pushing lr), and ARM code right after a function's last instruction (past its literal pool and
+  zero padding). Each must decode on its own: unconditional first instruction, no byte shared with
+  a known function, every path ending in a return or jump. 139 found (13 pointers, 126 after a
+  function), now 22,843 functions; untranslated instructions unchanged at 13. The list is written
+  to found_functions.txt beside the generated code (not committed).
+- Some found entries are pieces of functions whose start is still unknown (they begin with a `bl`);
+  they only run if the game calls that address, which is the case they cover.
+- Test build "MSR-nx 0.6.2 test".
+
 ## 2026-11-11 (later): 0.6.1 packaged
 
 - run004 (0.6.1 test): Mark hit the same objects with no stop; the run ended with his quit.

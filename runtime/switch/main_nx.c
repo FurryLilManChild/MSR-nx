@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.6.1"
+#define MSR_VERSION "0.6.2 test (issue 1, second crash)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"

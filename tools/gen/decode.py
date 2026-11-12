@@ -147,11 +147,102 @@ class Program:
                 self.walk(fn)
                 self.functions[addr] = fn
             new = [t for t in self.pc_relative_code_pointers() if t & ~1 not in self.entries]
-            if not new:
-                return self
             for t in new:
                 self.entries[t & ~1] = bool(t & 1)
             self.found_pc_relative = getattr(self, 'found_pc_relative', 0) + len(new)
+            if new:
+                continue
+            # Then functions no call reaches and the function list missed (issue 1, second report:
+            # a callback starting with `mov r0, r0`): pointers to code nothing covers, and ARM code
+            # right after the end of a function. Each must decode cleanly to its returns.
+            more = self.unreached_functions()
+            if not more:
+                return self
+            for t, thumb, why in more:
+                self.entries[t] = thumb
+                self.found_unreached[why] = self.found_unreached.get(why, 0) + 1
+                self.found_list.append((t, thumb, why))
+
+    found_unreached = {}
+    found_list = []
+
+    def coverage(self):
+        """Bytes that are instructions of a known function, and bytes that are its data
+        (literal pools and jump tables)."""
+        cov, data = set(), set()
+        for fn in self.functions.values():
+            for a, ins in fn.insns.items():
+                cov.update(range(a, a + ins.size))
+                for o in ins.operands:
+                    if o.type == A.ARM_OP_MEM and o.mem.base == A.ARM_REG_PC and o.mem.index == 0:
+                        la = ((a + 4) & ~3 if ins.thumb else a + 8) + o.mem.disp
+                        data.update(range(la, la + 8))
+            for ta, targets in fn.tables.items():
+                ins = fn.insns[ta]
+                if ins.thumb:
+                    data.update(range(ta + ins.size, ta + ins.size + 2 * len(targets) + 2))
+                elif ins.id == A.ARM_INS_LDR:
+                    data.update(range(ta + 8, ta + 8 + 4 * len(targets)))
+        return cov, data
+
+    def clean_function(self, t, thumb, cov):
+        """True if code at t walks as a function on its own: unconditional first instruction,
+        nothing shared with known functions, every path ending in a return or jump."""
+        fn = Function(t, thumb)
+        try:
+            self.walk(fn)
+        except Exception:
+            return False
+        if t not in fn.insns or fn.insns[t].cc not in (A.ARM_CC_AL, A.ARM_CC_INVALID):
+            return False
+        ends = 0
+        for a, ins in fn.insns.items():
+            if a in cov:
+                return False
+            kind = classify(ins, self)[0]
+            plain = ins.cc in (A.ARM_CC_AL, A.ARM_CC_INVALID)
+            if kind in ('return', 'ijump', 'table', 'jump') and plain:
+                ends += 1
+            elif kind in ('seq', 'call', 'cjump') and a + ins.size not in fn.insns and \
+                    a + ins.size not in self.entries:
+                return False
+            if kind == 'stop' or ins.mnem.startswith(
+                    ('ldrbt', 'strbt', 'ldrt', 'strt', 'cdp', 'mcr', 'mrc', 'ldc', 'stc', 'svc')):
+                return False
+        return ends > 0
+
+    def unreached_functions(self):
+        cov, data = self.coverage()
+        found = {}
+        # pointers anywhere in the image to code that no known function covers
+        for off in range(0, len(self.code) - 3, 4):
+            v = struct.unpack_from('<I', self.code, off)[0]
+            t, thumb = v & ~1, bool(v & 1)
+            if not self.in_text(t) or t in self.entries or t in cov or (not thumb and v & 3):
+                continue
+            if thumb:   # Thumb pointers only to a frame-saving start (data looks like Thumb too often)
+                ins = self.decode_one(t, True)
+                if not (ins and ins.id == A.ARM_INS_PUSH and 'lr' in ins.op_str):
+                    continue
+            if t not in found and self.clean_function(t, thumb, cov):
+                found[t] = (thumb, 'pointer')
+        # ARM code right after a function's last instruction (past its data and zero padding)
+        for fn in list(self.functions.values()):
+            if fn.thumb or not fn.insns:
+                continue
+            last = max(fn.insns)
+            ins = fn.insns[last]
+            if classify(ins, self)[0] not in ('return', 'jump', 'ijump', 'table') or \
+                    ins.cc not in (A.ARM_CC_AL, A.ARM_CC_INVALID):
+                continue
+            a = last + ins.size
+            while a in data or (self.in_text(a) and self.word(a) == 0):
+                a += 4
+            if not self.in_text(a) or a in self.entries or a in cov or a in found:
+                continue
+            if self.clean_function(a, False, cov):
+                found[a] = (False, 'after a function')
+        return [(t, th, why) for t, (th, why) in sorted(found.items())]
 
     def pc_relative_code_pointers(self):
         """Thumb code addresses made by `ldr rX, =offset` and `add rX, pc` in the same block."""

@@ -270,6 +270,10 @@ def main():
     tab += ['};']
     open(os.path.join(out_dir, 'table.c'), 'w').write('\n'.join(tab) + '\n')
     print('functions %d (%d found as pc-relative code pointers), units %d' % (len(prog.functions), getattr(prog, 'found_pc_relative', 0), n_units))
+    print('found by the generator beyond the function list:', dict(prog.found_unreached))
+    with open(os.path.join(out_dir, 'found_functions.txt'), 'w') as f:
+        for t, thumb, why in prog.found_list:
+            f.write('%08X %s %s\n' % (t, 'thumb' if thumb else 'arm', why))
     print('stats', dict(stats))
     print('untranslated', sum(problems.values()))
     for k, v in problems.most_common(30):
