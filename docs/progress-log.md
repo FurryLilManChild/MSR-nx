@@ -1,5 +1,11 @@
 # Progress log (newest first)
 
+## 2026-11-11 (later): 0.6.1 packaged
+
+- run004 (0.6.1 test): Mark hit the same objects with no stop; the run ended with his quit.
+- 0.6.1 is 0.6.0 plus the issue 1 fix. Release notes in docs/release-0.6.1.md; zip in
+  C:\MSR-nx\release.
+
 ## 2026-11-11: issue 1, crash when hitting things (0.6.0)
 
 - JAGSTAX's receipt and Mark's run003: the same stop, "unknown call target", r2 0010187F, lr

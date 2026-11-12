@@ -8,8 +8,8 @@ copy of the game.
 
 ## Status
 
-**Version 0.6.0 is a test release.** The game is playable from the start, at the 3DS's 30 frames per second,
-handheld or docked at stock clocks. New in 0.6.0: an optional 60 frames per second, which holds docked with the CPU
+**Version 0.6.1 is a test release.** The game is playable from the start, at the 3DS's 30 frames per second,
+handheld or docked at stock clocks. Since 0.6.0: an optional 60 frames per second, which holds docked with the CPU
 on boost. It has not been played to the end, so expect problems further in, and please report them (see below).
 
 | Part | State |
@@ -43,7 +43,7 @@ Session-by-session notes: [docs/progress-log.md](docs/progress-log.md).
 You need a Switch with custom firmware (Atmosphere) and your own copy of the game: the USA cartridge, dumped
 **decrypted** as a `.3ds` file (GodMode9 makes one with "Dump cartridge" and then "Decrypt").
 
-1. Download `MSR-nx-v0.6.0-switch.zip` from this repository's **Releases** page.
+1. Download `MSR-nx-v0.6.1-switch.zip` from this repository's **Releases** page.
 2. Extract the zip to the root of your SD card. It creates `switch/msr/` with `msr.nro` in it.
 3. On a PC with Python 3, make the game files from your dump with the script in the zip:
    `python extract_3ds.py "Metroid - Samus Returns (USA) (En,Fr,Es).3ds" msr_files`
