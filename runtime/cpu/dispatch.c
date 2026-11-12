@@ -35,7 +35,7 @@ static GuestFn lookup(u32 target) {
 void msr_call_indirect(Cpu* c, u32 target) {
     GuestFn f = lookup(target);
     if (!f) {
-        msr_log("fatal: call to %08X, not a known function (from lr %08X)", target, c->r[14]);
+        msr_receipt("fatal: call to %08X, not a known function (from lr %08X)", target, c->r[14]);
         msr_fatal(c, "unknown call target");
     }
     f(c);

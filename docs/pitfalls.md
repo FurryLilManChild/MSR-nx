@@ -79,3 +79,6 @@
   first clean-up new logs went into freed low numbers and looked missing. Number from the highest
   existing run. And when a log is missing, the build is the suspect, not how the tester ran it.
 
+- Function pointers made from the pc (`ldr rX, =offset; add rX, pc`) are invisible to call and
+  pointer scans. The generator now finds Thumb ones itself; a missed one stops the game with
+  "unknown call target" only when that path first runs (issue 1: snprintf's character writer).

@@ -136,11 +136,64 @@ class Program:
                 raise AssertionError(kind)
 
     def run(self):
-        for addr, thumb in sorted(self.entries.items()):
-            fn = Function(addr, thumb)
-            self.walk(fn)
-            self.functions[addr] = fn
-        return self
+        # Walk everything, then look for Thumb functions reached only through a pointer the code
+        # computes from the pc (a literal plus pc, such as the character writer snprintf passes to
+        # its formatter): no call or table names them, so the function list can miss them, and a
+        # call to one stopped the game (issue 1). Walk again with them until none are new.
+        while True:
+            self.functions = {}
+            for addr, thumb in sorted(self.entries.items()):
+                fn = Function(addr, thumb)
+                self.walk(fn)
+                self.functions[addr] = fn
+            new = [t for t in self.pc_relative_code_pointers() if t & ~1 not in self.entries]
+            if not new:
+                return self
+            for t in new:
+                self.entries[t & ~1] = bool(t & 1)
+            self.found_pc_relative = getattr(self, 'found_pc_relative', 0) + len(new)
+
+    def pc_relative_code_pointers(self):
+        """Thumb code addresses made by `ldr rX, =offset` and `add rX, pc` in the same block."""
+        caller_saved = (A.ARM_REG_R0, A.ARM_REG_R1, A.ARM_REG_R2, A.ARM_REG_R3, A.ARM_REG_R12, A.ARM_REG_LR)
+        found = set()
+        for fn in self.functions.values():
+            lit = {}
+            for a in sorted(fn.insns):
+                ins = fn.insns[a]
+                if a in fn.leaders:
+                    lit = {}
+                ops = ins.operands
+                plain = ins.cc in (A.ARM_CC_AL, A.ARM_CC_INVALID)
+                if (ins.id == A.ARM_INS_LDR and len(ops) == 2 and ops[1].type == A.ARM_OP_MEM and
+                        ops[1].mem.base == A.ARM_REG_PC and ops[1].mem.index == 0 and plain):
+                    la = ((a + 4) & ~3 if ins.thumb else a + 8) + ops[1].mem.disp
+                    if TEXT_BASE <= la <= TEXT_BASE + len(self.code) - 4:
+                        lit[ops[0].reg] = self.word(la)
+                    continue
+                if ins.id == A.ARM_INS_ADD and len(ops) in (2, 3) and ops[0].type == A.ARM_OP_REG and plain:
+                    regs = [o.reg for o in ops[1:] if o.type == A.ARM_OP_REG]
+                    if A.ARM_REG_PC in regs and len(regs) == len(ops) - 1:
+                        other = [r for r in regs if r != A.ARM_REG_PC]
+                        src = other[0] if other else ops[0].reg
+                        if src in lit:
+                            t = (lit[src] + (a + 4 if ins.thumb else a + 8)) & 0xFFFFFFFF
+                            if t & 1 and self.in_text(t & ~1):
+                                found.add(t)
+                # forget registers this instruction writes
+                if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
+                    for r in caller_saved:
+                        lit.pop(r, None)
+                elif ins.id in (A.ARM_INS_POP, A.ARM_INS_LDM, A.ARM_INS_LDMDB, A.ARM_INS_LDMIB, A.ARM_INS_LDMDA):
+                    for o in ops:
+                        if o.type == A.ARM_OP_REG:
+                            lit.pop(o.reg, None)
+                elif ops and ops[0].type == A.ARM_OP_REG and not ins.mnem.startswith(
+                        ('str', 'cmp', 'cmn', 'tst', 'teq', 'push', 'vstr', 'b')):
+                    lit.pop(ops[0].reg, None)
+                    if ins.writeback and len(ops) > 1 and ops[1].type == A.ARM_OP_MEM:
+                        lit.pop(ops[1].mem.base, None)
+        return found
 
 
 # The ARM compiler's Thumb switch helper (__ARM_common_switch8): `blx helper` with the index in

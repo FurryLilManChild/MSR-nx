@@ -1,5 +1,19 @@
 # Progress log (newest first)
 
+## 2026-11-11: issue 1, crash when hitting things (0.6.0)
+
+- JAGSTAX's receipt and Mark's run003: the same stop, "unknown call target", r2 0010187F, lr
+  00301779. 0x301776 is `blx r2` in the game's printf-style formatter, calling the character
+  writer its snprintf passes in. That writer (Thumb, 0x10187E) is never called directly: its
+  address is made from the pc (`ldr r2, =offset` then `add r2, pc`), so neither msr2ds's analysis
+  nor ours had it, and with no interpreter behind the dispatcher the call stopped the game.
+- Fixed in the generator (tools/gen/decode.py): after walking every function it looks for Thumb
+  code addresses built from a pc-relative literal plus pc, adds them as functions and walks again.
+  7 found (0x10187E, 0x102932, 0x1050EC, 0x105120, 0x105140, 0x1052D0, 0x105510), now 22,704
+  functions. Absolute pointers in the whole image and ARM-mode pc-relative ones turned up no others.
+- The stop line now names the target address in the receipt (it was only in the full log).
+- Test build "MSR-nx 0.6.1 test".
+
 ## 2026-11-10 (noon): 0.6.0 packaged
 
 - 0.6.0: 60 fps option and the graphics thread, "(test)" dropped from their port menu rows, logs off

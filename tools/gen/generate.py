@@ -269,7 +269,7 @@ def main():
     tab += ['  %s,' % fname(a) for a in sorted(prog.functions)]
     tab += ['};']
     open(os.path.join(out_dir, 'table.c'), 'w').write('\n'.join(tab) + '\n')
-    print('functions %d, units %d' % (len(prog.functions), n_units))
+    print('functions %d (%d found as pc-relative code pointers), units %d' % (len(prog.functions), getattr(prog, 'found_pc_relative', 0), n_units))
     print('stats', dict(stats))
     print('untranslated', sum(problems.values()))
     for k, v in problems.most_common(30):
